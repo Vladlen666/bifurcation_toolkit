@@ -154,7 +154,7 @@ class MainWindow(QMainWindow):
         self.traj_lines: list[Line2D] = []
         self.xt_data: list[tuple[np.ndarray, np.ndarray]] = []
 
-        self.nullcline_art = []
+        self.nullcline_art = []  # теперь содержит QuadContourSet
         self.nullcline_pts = []
         self.field_art = []
         self.sep_lines = []
@@ -175,15 +175,14 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.phase_canvas)
 
         tabs = QTabWidget()
-        # Plots tab
         page = QWidget()
         QVBoxLayout(page).addWidget(self.splitter)
         tabs.addTab(page, "Plots")
-        # Equilibria tab
+
         self.eq_table = QTableWidget(0, 5)
         self.eq_table.setHorizontalHeaderLabels(["x", "y", "type", "λ₁", "λ₂"])
         tabs.addTab(self.eq_table, "Equilibria")
-        # Hopf tab
+
         tabs.addTab(self.hopf_canvas, "Hopf")
         self.tabs = tabs
         self.hopf_tab_index = tabs.count() - 1
@@ -195,12 +194,10 @@ class MainWindow(QMainWindow):
         self._configure_phase_axes()
         self._connect_events()
 
-        # for x(t) window
         self.xt_fig = None
         self.xt_ax = None
 
     def _compile_system(self):
-        # --- symbolic setup ---
         x, y, m1, m2 = sp.symbols("x y mu1 mu2")
         f_sym = sp.sympify(self.f_expr)
         g_sym = sp.sympify(self.g_expr)
@@ -208,7 +205,6 @@ class MainWindow(QMainWindow):
         detJ = sp.simplify(J.det())
         trJ_sym = sp.simplify(J.trace())
 
-        # lambdas for RHS and Jacobian entries
         self.f_lam = sp.lambdify((x, y, m1, m2), f_sym,
                                  modules=[SAFE_MODULE, 'numpy'])
         self.g_lam = sp.lambdify((x, y, m1, m2), g_sym,
@@ -224,13 +220,11 @@ class MainWindow(QMainWindow):
         self.detJ_lam = sp.lambdify((x, y, m1, m2), detJ,
                                     modules=[SAFE_MODULE, 'numpy'])
 
-        # RHS function
         self.rhs_func: Callable = lambda t, s, μ1, μ2: np.array([
             self.f_lam(s[0], s[1], μ1, μ2),
             self.g_lam(s[0], s[1], μ1, μ2)
         ])
 
-        # --- Precompute Hopf branches: solve f=0, g=0, trJ=0 -> μ2 = φ(μ1) ---
         self.hopf_branches.clear()
         try:
             eqs = sp.solve([f_sym, g_sym], [x, y], dict=True)
@@ -360,13 +354,25 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Selected μ=({μ1:.3g}, {μ2:.3g})")
 
     def _find_equilibria_numeric(self, μ1: float, μ2: float) -> list[tuple[float, float]]:
+        x_min = self.phase_range["x_min"]
+        x_max = self.phase_range["x_max"]
+        y_min = self.phase_range["y_min"]
+        y_max = self.phase_range["y_max"]
+
+        if not all(np.isfinite([x_min, x_max, y_min, y_max])):
+            raise ValueError(f"phase_range must be finite, got {self.phase_range}")
+        if x_min >= x_max or y_min >= y_max:
+            raise ValueError(
+                f"Invalid phase_range: require x_min < x_max and y_min < y_max, "
+                f"got x:[{x_min},{x_max}], y:[{y_min},{y_max}]"
+            )
+
         sols: list[tuple[float, float]] = []
         tol_f, tol_xy = 1e-4, 1e-3
-        # coarse grid 5×5
         guesses = [
             (x0, y0)
-            for x0 in np.linspace(self.phase_range["x_min"], self.phase_range["x_max"], 5)
-            for y0 in np.linspace(self.phase_range["y_min"], self.phase_range["y_max"], 5)
+            for x0 in np.linspace(self.phase_range["x_min"], self.phase_range["x_max"], 10)
+            for y0 in np.linspace(self.phase_range["y_min"], self.phase_range["y_max"], 10)
         ]
         def fg(v):
             return self.f_lam(v[0], v[1], μ1, μ2), self.g_lam(v[0], v[1], μ1, μ2)
@@ -383,7 +389,6 @@ class MainWindow(QMainWindow):
                 if any(np.hypot(xe - xs, ye - ys) < tol_xy for xs, ys in sols):
                     continue
                 sols.append((xe, ye))
-        # refine on 50×50
         nx = np.linspace(self.phase_range["x_min"], self.phase_range["x_max"], 50)
         ny = np.linspace(self.phase_range["y_min"], self.phase_range["y_max"], 50)
         XX, YY = np.meshgrid(nx, ny)
@@ -410,20 +415,29 @@ class MainWindow(QMainWindow):
         return [(round(x, 6), round(y, 6)) for x, y in sols]
 
     def _draw_nullclines(self, μ1: float, μ2: float):
-        for art in self.nullcline_art:
-            if hasattr(art, "collections"):
-                for c in art.collections:
-                    c.remove()
-            else:
-                art.remove()
+        ax = self.phase_canvas.ax
+
+        # --- 1) удаляем старые контуры ---
+        for cs in self.nullcline_art:
+            try:
+                cs.remove()
+            except Exception:
+                pass
         self.nullcline_art.clear()
+
+        # --- 2) удаляем старые точки и подписи ---
         for obj in self.nullcline_pts:
-            obj.remove()
+            try:
+                obj.remove()
+            except Exception:
+                pass
         self.nullcline_pts.clear()
+
+        # --- 3) очищаем таблицу и список равновесий ---
         self.eq_table.setRowCount(0)
         self.equilibria.clear()
 
-        ax = self.phase_canvas.ax
+        # --- 4) сетка и значение F, G ---
         xmin, xmax = ax.get_xlim()
         ymin, ymax = ax.get_ylim()
         xx, yy = np.meshgrid(
@@ -433,60 +447,83 @@ class MainWindow(QMainWindow):
         with np.errstate(over='ignore', invalid='ignore'):
             F = self.f_lam(xx, yy, μ1, μ2)
             G = self.g_lam(xx, yy, μ1, μ2)
-        F = np.nan_to_num(F, nan=0.0, posinf=np.nan, neginf=np.nan)
-        G = np.nan_to_num(G, nan=0.0, posinf=np.nan, neginf=np.nan)
+        F = np.nan_to_num(F, nan=0.0, posinf=0.0, neginf=0.0)
+        G = np.nan_to_num(G, nan=0.0, posinf=0.0, neginf=0.0)
 
+        # --- 5) рисуем изоклины и сохраняем QuadContourSet ---
         cf = ax.contour(xx, yy, F, levels=[0], colors="blue",
                         linestyles="--", linewidths=1.2)
         cg = ax.contour(xx, yy, G, levels=[0], colors="green",
                         linestyles="-", linewidths=1.2)
         self.nullcline_art += [cf, cg]
 
+        # --- 6) находим численные равновесия и классифицируем ---
         for xf, yf in self._find_equilibria_numeric(μ1, μ2):
             if not (xmin <= xf <= xmax and ymin <= yf <= ymax):
                 continue
-            a = self.J11(xf, yf, μ1, μ2)
-            b = self.J12(xf, yf, μ1, μ2)
-            c = self.J21(xf, yf, μ1, μ2)
-            d = self.J22(xf, yf, μ1, μ2)
-            Jmat = np.array([[a, b], [c, d]])
-            ev, evec = np.linalg.eig(Jmat)
-            re, im = np.real(ev), np.imag(ev)
 
-            if abs(re[0]) < 1e-6 and abs(re[1]) < 1e-6 and np.any(im != 0):
-                typ, color = "center", "green"
-            elif np.any(im != 0):
-                typ, color = (("stable focus", "purple") if np.all(re < 0)
-                              else ("unstable focus", "magenta"))
-            elif re[0] * re[1] < 0:
+            # якобиан в точке
+            J11 = float(self.J11(xf, yf, μ1, μ2))
+            J12 = float(self.J12(xf, yf, μ1, μ2))
+            J21 = float(self.J21(xf, yf, μ1, μ2))
+            J22 = float(self.J22(xf, yf, μ1, μ2))
+            Jmat = np.array([[J11, J12], [J21, J22]])
+            trace = J11 + J22
+            det = float(self.detJ_lam(xf, yf, μ1, μ2))
+            disc = trace * trace - 4 * det
+
+            # собственные числа и векторы
+            eigvals, eigvecs = np.linalg.eig(Jmat)
+            λ1, λ2 = eigvals
+
+            # классификация
+            tol = 1e-6
+            if det < 0:
                 typ, color = "saddle", "red"
             else:
-                typ, color = (("stable node", "blue") if np.all(re < 0)
-                              else ("unstable node", "cyan"))
+                if disc > tol:
+                    if trace < 0:
+                        typ, color = "stable node", "blue"
+                    else:
+                        typ, color = "unstable node", "cyan"
+                else:
+                    if abs(trace) < tol:
+                        typ, color = "center", "green"
+                    elif trace < 0:
+                        typ, color = "stable focus", "purple"
+                    else:
+                        typ, color = "unstable focus", "magenta"
 
+            # рисуем точку и подпись
             pt, = ax.plot(xf, yf, "o", color=color, ms=8)
             txt = ax.text(xf, yf, typ, color=color,
                           fontsize="small", va="bottom", ha="right")
             self.nullcline_pts += [pt, txt]
-            self.equilibria.append({'x': xf, 'y': yf, 'type': typ,
-                                    'eigvals': ev, 'eigvecs': evec})
+
+            # вносим в таблицу
             row = self.eq_table.rowCount()
             self.eq_table.insertRow(row)
-            for col, val in enumerate([
-                xf, yf, typ,
-                f"{ev[0]:.3g}", f"{ev[1]:.3g}"
-            ]):
-                self.eq_table.setItem(row, col, QTableWidgetItem(str(val)))
+            for col, val in enumerate((xf, yf, typ, λ1, λ2)):
+                item = QTableWidgetItem(f"{val:.6g}" if isinstance(val, float) else str(val))
+                self.eq_table.setItem(row, col, item)
 
-        handles = [
-            Line2D([], [], marker="o", color="red",     linestyle="", label="saddle"),
-            Line2D([], [], marker="o", color="blue",    linestyle="", label="stable node"),
-            Line2D([], [], marker="o", color="cyan",    linestyle="", label="unstable node"),
-            Line2D([], [], marker="o", color="purple",  linestyle="", label="stable focus"),
+            # сохраняем для сепаратрис
+            self.equilibria.append({
+                'x': xf, 'y': yf,
+                'type': typ,
+                'eigvals': eigvals,
+                'eigvecs': eigvecs
+            })
+
+        # --- 7) легенда и перерисовка ---
+        ax.legend(handles=[
+            Line2D([], [], marker="o", color="red", linestyle="", label="saddle"),
+            Line2D([], [], marker="o", color="blue", linestyle="", label="stable node"),
+            Line2D([], [], marker="o", color="cyan", linestyle="", label="unstable node"),
+            Line2D([], [], marker="o", color="purple", linestyle="", label="stable focus"),
             Line2D([], [], marker="o", color="magenta", linestyle="", label="unstable focus"),
-            Line2D([], [], marker="o", color="green",   linestyle="", label="center")
-        ]
-        ax.legend(handles=handles, fontsize="small", loc="upper right")
+            Line2D([], [], marker="o", color="green", linestyle="", label="center")
+        ], fontsize="small", loc="upper right")
         self.phase_canvas.canvas.draw_idle()
 
     def _toggle_vector_field(self, chk: bool):

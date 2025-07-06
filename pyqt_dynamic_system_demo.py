@@ -154,11 +154,11 @@ class MainWindow(QMainWindow):
         self.traj_lines: list[Line2D] = []
         self.xt_data: list[tuple[np.ndarray, np.ndarray]] = []
 
-        self.nullcline_art = []  # теперь содержит QuadContourSet
-        self.nullcline_pts = []
-        self.field_art = []
-        self.sep_lines = []
-        self.equilibria = []
+        self.nullcline_art: list = []   # QuadContourSet objects
+        self.nullcline_pts: list = []  # point and text artists
+        self.field_art: list = []
+        self.sep_lines: list = []
+        self.equilibria: list = []
 
         self.show_field = False
         self.param_marker = None
@@ -194,6 +194,7 @@ class MainWindow(QMainWindow):
         self._configure_phase_axes()
         self._connect_events()
 
+        # x(t) window references
         self.xt_fig = None
         self.xt_ax = None
 
@@ -230,10 +231,8 @@ class MainWindow(QMainWindow):
             eqs = sp.solve([f_sym, g_sym], [x, y], dict=True)
         except (NotImplementedError, ValueError):
             eqs = []
-
         for sol in eqs:
-            xi = sol[x]
-            yi = sol[y]
+            xi = sol[x]; yi = sol[y]
             trJ_i = trJ_sym.subs({x: xi, y: yi})
             sol_m2 = sp.solve(trJ_i, m2)
             if not sol_m2:
@@ -294,9 +293,10 @@ class MainWindow(QMainWindow):
         bar.addAction(self.act_hopf)
 
         bar.addSeparator()
+        # Plot x(t) button: opens/upgrades the x(t) window on click
         self.act_xt = QAction("Plot x(t)", self)
         self.act_xt.setEnabled(False)
-        self.act_xt.triggered.connect(self._plot_xt)
+        self.act_xt.triggered.connect(self._update_xt_plot)
         bar.addAction(self.act_xt)
 
     def _configure_param_axes(self):
@@ -369,13 +369,15 @@ class MainWindow(QMainWindow):
 
         sols: list[tuple[float, float]] = []
         tol_f, tol_xy = 1e-4, 1e-3
+        # coarse grid 10×10
         guesses = [
             (x0, y0)
-            for x0 in np.linspace(self.phase_range["x_min"], self.phase_range["x_max"], 10)
-            for y0 in np.linspace(self.phase_range["y_min"], self.phase_range["y_max"], 10)
+            for x0 in np.linspace(x_min, x_max, 10)
+            for y0 in np.linspace(y_min, y_max, 10)
         ]
         def fg(v):
             return self.f_lam(v[0], v[1], μ1, μ2), self.g_lam(v[0], v[1], μ1, μ2)
+
         for x0, y0 in guesses:
             sol = root(
                 lambda v: [np.tanh(fg(v)[0]), np.tanh(fg(v)[1])],
@@ -389,8 +391,10 @@ class MainWindow(QMainWindow):
                 if any(np.hypot(xe - xs, ye - ys) < tol_xy for xs, ys in sols):
                     continue
                 sols.append((xe, ye))
-        nx = np.linspace(self.phase_range["x_min"], self.phase_range["x_max"], 50)
-        ny = np.linspace(self.phase_range["y_min"], self.phase_range["y_max"], 50)
+
+        # refine on 50×50 grid
+        nx = np.linspace(x_min, x_max, 50)
+        ny = np.linspace(y_min, y_max, 50)
         XX, YY = np.meshgrid(nx, ny)
         with np.errstate(over='ignore', invalid='ignore'):
             FF = self.f_lam(XX, YY, μ1, μ2)
@@ -412,12 +416,13 @@ class MainWindow(QMainWindow):
                 if any(np.hypot(xe - xs, ye - ys) < tol_xy for xs, ys in sols):
                     continue
                 sols.append((xe, ye))
-        return [(round(x, 6), round(y, 6)) for x, y in sols]
+
+        return [(round(xe, 6), round(ye, 6)) for xe, ye in sols]
 
     def _draw_nullclines(self, μ1: float, μ2: float):
         ax = self.phase_canvas.ax
 
-        # --- 1) удаляем старые контуры ---
+        # 1) удалить старые контуры
         for cs in self.nullcline_art:
             try:
                 cs.remove()
@@ -425,7 +430,7 @@ class MainWindow(QMainWindow):
                 pass
         self.nullcline_art.clear()
 
-        # --- 2) удаляем старые точки и подписи ---
+        # 2) удалить старые точки и подписи
         for obj in self.nullcline_pts:
             try:
                 obj.remove()
@@ -433,11 +438,11 @@ class MainWindow(QMainWindow):
                 pass
         self.nullcline_pts.clear()
 
-        # --- 3) очищаем таблицу и список равновесий ---
+        # 3) очистить таблицу и список равновесий
         self.eq_table.setRowCount(0)
         self.equilibria.clear()
 
-        # --- 4) сетка и значение F, G ---
+        # 4) подготовить сетку
         xmin, xmax = ax.get_xlim()
         ymin, ymax = ax.get_ylim()
         xx, yy = np.meshgrid(
@@ -450,19 +455,19 @@ class MainWindow(QMainWindow):
         F = np.nan_to_num(F, nan=0.0, posinf=0.0, neginf=0.0)
         G = np.nan_to_num(G, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # --- 5) рисуем изоклины и сохраняем QuadContourSet ---
+        # 5) рисовать изоклины
         cf = ax.contour(xx, yy, F, levels=[0], colors="blue",
                         linestyles="--", linewidths=1.2)
         cg = ax.contour(xx, yy, G, levels=[0], colors="green",
                         linestyles="-", linewidths=1.2)
         self.nullcline_art += [cf, cg]
 
-        # --- 6) находим численные равновесия и классифицируем ---
+        # 6) численные равновесия и классификация
         for xf, yf in self._find_equilibria_numeric(μ1, μ2):
             if not (xmin <= xf <= xmax and ymin <= yf <= ymax):
                 continue
 
-            # якобиан в точке
+            # вычислить якобиан и его характеристики
             J11 = float(self.J11(xf, yf, μ1, μ2))
             J12 = float(self.J12(xf, yf, μ1, μ2))
             J21 = float(self.J21(xf, yf, μ1, μ2))
@@ -470,18 +475,18 @@ class MainWindow(QMainWindow):
             Jmat = np.array([[J11, J12], [J21, J22]])
             trace = J11 + J22
             det = float(self.detJ_lam(xf, yf, μ1, μ2))
-            disc = trace * trace - 4 * det
+            discr = trace*trace - 4*det
 
             # собственные числа и векторы
             eigvals, eigvecs = np.linalg.eig(Jmat)
-            λ1, λ2 = eigvals
+            lam1, lam2 = eigvals
 
-            # классификация
+            # классификация типов
             tol = 1e-6
             if det < 0:
                 typ, color = "saddle", "red"
             else:
-                if disc > tol:
+                if discr > tol:
                     if trace < 0:
                         typ, color = "stable node", "blue"
                     else:
@@ -494,20 +499,20 @@ class MainWindow(QMainWindow):
                     else:
                         typ, color = "unstable focus", "magenta"
 
-            # рисуем точку и подпись
+            # рисовать точку и подпись
             pt, = ax.plot(xf, yf, "o", color=color, ms=8)
             txt = ax.text(xf, yf, typ, color=color,
                           fontsize="small", va="bottom", ha="right")
             self.nullcline_pts += [pt, txt]
 
-            # вносим в таблицу
+            # заполнить таблицу
             row = self.eq_table.rowCount()
             self.eq_table.insertRow(row)
-            for col, val in enumerate((xf, yf, typ, λ1, λ2)):
+            for col, val in enumerate((xf, yf, typ, lam1, lam2)):
                 item = QTableWidgetItem(f"{val:.6g}" if isinstance(val, float) else str(val))
                 self.eq_table.setItem(row, col, item)
 
-            # сохраняем для сепаратрис
+            # сохранить для сепаратрис
             self.equilibria.append({
                 'x': xf, 'y': yf,
                 'type': typ,
@@ -515,7 +520,7 @@ class MainWindow(QMainWindow):
                 'eigvecs': eigvecs
             })
 
-        # --- 7) легенда и перерисовка ---
+        # 7) легенда и перерисовка
         ax.legend(handles=[
             Line2D([], [], marker="o", color="red", linestyle="", label="saddle"),
             Line2D([], [], marker="o", color="blue", linestyle="", label="stable node"),
@@ -600,52 +605,33 @@ class MainWindow(QMainWindow):
     def _toggle_hopf(self, chk: bool):
         ax = self.hopf_canvas.ax
         ax.clear()
-
         if chk:
-            # Переключаемся на вкладку Hopf
             self.tabs.setCurrentIndex(self.hopf_tab_index)
-
-            # Быстро рисуем все предварительно сгенерированные ветви
             for phi_fun, xi_fun, yi_fun in self.hopf_branches:
-                # Дискретизация по μ1
-                m1_vals = np.linspace(self.range["mu1_min"],
-                                      self.range["mu1_max"], 400)
+                m1_vals = np.linspace(self.range["mu1_min"], self.range["mu1_max"], 400)
                 m2_vals = phi_fun(m1_vals)
-
-                # Отсев по диапазону μ2
-                mask_mu = np.isfinite(m2_vals) & \
-                          (m2_vals >= self.range["mu2_min"]) & \
-                          (m2_vals <= self.range["mu2_max"])
-                m1_f, m2_f = m1_vals[mask_mu], m2_vals[mask_mu]
-
-                # Проверка фазовых границ равновесий
+                mask = np.isfinite(m2_vals) & \
+                       (m2_vals >= self.range["mu2_min"]) & \
+                       (m2_vals <= self.range["mu2_max"])
+                m1_f, m2_f = m1_vals[mask], m2_vals[mask]
                 x_f = xi_fun(m1_f, m2_f)
                 y_f = yi_fun(m1_f, m2_f)
                 mask_xy = (x_f >= self.phase_range["x_min"]) & (x_f <= self.phase_range["x_max"]) & \
                           (y_f >= self.phase_range["y_min"]) & (y_f <= self.phase_range["y_max"])
-
-                # Рисуем участки, попавшие в окно фазовой плоскости
                 ax.plot(m1_f[mask_xy], m2_f[mask_xy],
                         color="white", linewidth=2, label="trJ = 0")
-
             ax.set_title("Hopf curve: trJ = 0")
-            ax.set_xlabel("μ1")
-            ax.set_ylabel("μ2")
+            ax.set_xlabel("μ1"); ax.set_ylabel("μ2")
             ax.legend(loc="upper right")
-
         else:
-            # Возвращаемся на вкладку Plots
             self.tabs.setCurrentIndex(0)
-
         self.hopf_canvas.canvas.draw_idle()
 
     def _on_phase_click(self, e):
         ax = self.phase_canvas.ax
-        # правый клик — удаляем близкую траекторию
         if e.button == 3 and e.inaxes == ax:
             self._delete_trajectory_at(e.xdata, e.ydata)
             return
-        # левый двойной клик — добавляем траекторию
         if e.button == 1 and e.dblclick and self.current_mu:
             x0, y0 = e.xdata, e.ydata
             μ1, μ2 = self.current_mu
@@ -673,13 +659,13 @@ class MainWindow(QMainWindow):
             T, N = 15, 300
             sol_f = solve_ivp(
                 rhs_sat, (0, T), [x0, y0],
-                t_eval=np.linspace(0, T, N // 2),
+                t_eval=np.linspace(0, T, N//2),
                 method=method, max_step=0.2,
                 rtol=1e-4, atol=1e-7, events=stop_out
             )
             sol_b = solve_ivp(
                 rhs_sat, (0, -T), [x0, y0],
-                t_eval=np.linspace(0, -T, N // 2),
+                t_eval=np.linspace(0, -T, N//2),
                 method=method, max_step=0.2,
                 rtol=1e-4, atol=1e-7, events=stop_out
             )
@@ -690,11 +676,21 @@ class MainWindow(QMainWindow):
             xs = np.concatenate([xb, xf])
             ys = np.concatenate([yb, yf])
 
-            ln, = ax.plot(xs, ys, color=next(self.color_cycle))
+            # ln, = ax.plot(xs, ys, color=next(self.color_cycle))
+            # self.traj_lines.append(ln)
+            # self.xt_data.append((np.concatenate([sol_b.t[::-1][:-1], sol_f.t]), xs))
+
+            color = next(self.color_cycle)
+            ln, = ax.plot(xs, ys, color=color)
             self.traj_lines.append(ln)
-            self.xt_data.append((np.concatenate([sol_b.t[::-1][:-1], sol_f.t]), xs))
+            t_full = np.concatenate([sol_b.t[::-1][:-1], sol_f.t])
+            self.xt_data.append((t_full, xs, color))
             self.phase_canvas.canvas.draw_idle()
+
+            # включить кнопку и обновить x(t), если окно уже открыто
             self.act_xt.setEnabled(True)
+            if self.xt_fig is not None:
+                self._update_xt_plot()
 
     def _delete_trajectory_at(self, x_click: float, y_click: float):
         if not self.traj_lines:
@@ -710,13 +706,37 @@ class MainWindow(QMainWindow):
                 del self.traj_lines[i]
                 del self.xt_data[i]
                 self.phase_canvas.canvas.draw_idle()
-                if not self.traj_lines:
-                    self.act_xt.setEnabled(False)
+                if self.xt_fig is not None:
+                    if self.traj_lines:
+                        self._update_xt_plot()
+                    else:
+                        # очистить окно x(t)
+                        self.xt_ax.cla()
+                        self.xt_ax.set_title("x(t) for all trajectories")
+                        self.xt_ax.set_xlabel("t")
+                        self.xt_ax.set_ylabel("x(t)")
+                        self.xt_fig.canvas.draw_idle()
+                        self.act_xt.setEnabled(False)
                 return
 
-    def _plot_xt(self):
+    def _clear_trajectories(self):
+        for ln in self.traj_lines:
+            ln.remove()
+        self.traj_lines.clear()
+        self.phase_canvas.canvas.draw_idle()
+        self.xt_data.clear()
+        # очистить окно x(t), если открыто
+        if self.xt_fig is not None:
+            self.xt_ax.cla()
+            self.xt_ax.set_title("x(t) for all trajectories")
+            self.xt_ax.set_xlabel("t")
+            self.xt_ax.set_ylabel("x(t)")
+            self.xt_fig.canvas.draw_idle()
+        self.act_xt.setEnabled(False)
+
+    def _update_xt_plot(self):
+        """Создать или обновить окно x(t) для всех текущих траекторий."""
         if not self.xt_data:
-            QMessageBox.information(self, "x(t)", "Нет данных. Сначала постройте траекторию.")
             return
         if self.xt_fig is None:
             self.xt_fig, self.xt_ax = plt.subplots()
@@ -727,24 +747,10 @@ class MainWindow(QMainWindow):
         self.xt_ax.set_title("x(t) for all trajectories")
         self.xt_ax.set_xlabel("t")
         self.xt_ax.set_ylabel("x(t)")
-        for t_arr, x_arr in self.xt_data:
-            self.xt_ax.plot(t_arr, x_arr)
-        self.xt_fig.canvas.draw()
+        for t_arr, x_arr, color in self.xt_data:
+            self.xt_ax.plot(t_arr, x_arr, color=color)
+        self.xt_fig.canvas.draw_idle()
         self.xt_fig.show()
-
-    def _clear_trajectories(self):
-        for ln in self.traj_lines:
-            ln.remove()
-        self.traj_lines.clear()
-        self.phase_canvas.canvas.draw_idle()
-        self.xt_data.clear()
-        if self.xt_ax is not None:
-            self.xt_ax.cla()
-            self.xt_ax.set_title("x(t) for all trajectories")
-            self.xt_ax.set_xlabel("t")
-            self.xt_ax.set_ylabel("x(t)")
-            self.xt_fig.canvas.draw()
-        self.act_xt.setEnabled(False)
 
     def _edit_system(self):
         dlg = SystemDialog(self.f_expr, self.g_expr, self)

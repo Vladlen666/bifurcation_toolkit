@@ -1,20 +1,24 @@
 # -*- coding: utf-8 -*-
-"""Dynamic-System Sandbox — Bogdanov–Takens only (robust, 2025-07-06) — full version with BT table"""
+"""Dynamic-System Sandbox — Bogdanov–Takens only (robust, 2025-07-06) — full version with BT table,
+limit-cycle detection, and user-configurable trajectory time"""
 
 from __future__ import annotations
-import sys, itertools
+import sys
+import itertools
 from collections.abc import Callable
 
 import numpy as np
 import sympy as sp
 from scipy.integrate import solve_ivp
-from scipy.optimize import root, root_scalar
+from scipy.optimize import root
 import matplotlib
 matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.lines import Line2D
 
+from PyQt6.QtWidgets import QComboBox
+from PyQt6.QtWidgets import QProgressBar
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
@@ -139,7 +143,6 @@ class MainWindow(QMainWindow):
         # система
         self.f_expr = "-2*exp(-x) + exp(-2*x) + y"
         self.g_expr = "(-x + mu2*y + mu1)*0.01"
-
         # списки
         self.eq_funcs = []
         self.hopf_branches = []
@@ -211,14 +214,22 @@ class MainWindow(QMainWindow):
         detJ, trJ = sp.simplify(J.det()), sp.simplify(J.trace())
 
         # лямбда-функции для RHS и Якобиана
-        self.f_lam = sp.lambdify((x, y, m1, m2), f_sym, modules=[SAFE_MODULE, 'numpy'])
-        self.g_lam = sp.lambdify((x, y, m1, m2), g_sym, modules=[SAFE_MODULE, 'numpy'])
-        self.J11 = sp.lambdify((x, y, m1, m2), J[0, 0], modules=[SAFE_MODULE, 'numpy'])
-        self.J12 = sp.lambdify((x, y, m1, m2), J[0, 1], modules=[SAFE_MODULE, 'numpy'])
-        self.J21 = sp.lambdify((x, y, m1, m2), J[1, 0], modules=[SAFE_MODULE, 'numpy'])
-        self.J22 = sp.lambdify((x, y, m1, m2), J[1, 1], modules=[SAFE_MODULE, 'numpy'])
-        self.detJ_lam = sp.lambdify((x, y, m1, m2), detJ, modules=[SAFE_MODULE, 'numpy'])
-        self.trJ_lam = sp.lambdify((x, y, m1, m2), trJ, modules=[SAFE_MODULE, 'numpy'])
+        self.f_lam = sp.lambdify((x, y, m1, m2), f_sym,
+                                  modules=[SAFE_MODULE, 'numpy'])
+        self.g_lam = sp.lambdify((x, y, m1, m2), g_sym,
+                                  modules=[SAFE_MODULE, 'numpy'])
+        self.J11 = sp.lambdify((x, y, m1, m2), J[0, 0],
+                                modules=[SAFE_MODULE, 'numpy'])
+        self.J12 = sp.lambdify((x, y, m1, m2), J[0, 1],
+                                modules=[SAFE_MODULE, 'numpy'])
+        self.J21 = sp.lambdify((x, y, m1, m2), J[1, 0],
+                                modules=[SAFE_MODULE, 'numpy'])
+        self.J22 = sp.lambdify((x, y, m1, m2), J[1, 1],
+                                modules=[SAFE_MODULE, 'numpy'])
+        self.detJ_lam = sp.lambdify((x, y, m1, m2), detJ,
+                                     modules=[SAFE_MODULE, 'numpy'])
+        self.trJ_lam = sp.lambdify((x, y, m1, m2), trJ,
+                                    modules=[SAFE_MODULE, 'numpy'])
         self.rhs_func = lambda t, s, μ1, μ2: np.array([
             self.f_lam(s[0], s[1], μ1, μ2),
             self.g_lam(s[0], s[1], μ1, μ2)
@@ -230,15 +241,18 @@ class MainWindow(QMainWindow):
         try:
             for sol in sp.solve([f_sym, g_sym], [x, y], dict=True):
                 xi, yi = sol[x], sol[y]
-                xi_f = sp.lambdify((m1, m2), xi, modules=[SAFE_MODULE, 'numpy'])
-                yi_f = sp.lambdify((m1, m2), yi, modules=[SAFE_MODULE, 'numpy'])
+                xi_f = sp.lambdify((m1, m2), xi,
+                                   modules=[SAFE_MODULE, 'numpy'])
+                yi_f = sp.lambdify((m1, m2), yi,
+                                   modules=[SAFE_MODULE, 'numpy'])
                 self.eq_funcs.append((xi_f, yi_f))
                 trJ_eq = trJ.subs({x: xi, y: yi})
                 roots = sp.solve(trJ_eq, m2)
                 if not roots:
                     continue
                 phi = roots[0]
-                phi_f = sp.lambdify(m1, phi, modules=[SAFE_MODULE, 'numpy'])
+                phi_f = sp.lambdify(m1, phi,
+                                     modules=[SAFE_MODULE, 'numpy'])
                 self.hopf_branches.append((phi_f, xi_f, yi_f))
         except (sp.SympifyError, NotImplementedError):
             pass
@@ -246,12 +260,9 @@ class MainWindow(QMainWindow):
         self._compute_bt_points()
 
     def _compute_bt_points(self):
-        """Ищет BT-точки, конвертируя сначала в численные функции, а потом решая корни через SciPy."""
-        # лямбда-функции из компиляции
-        f_num = self.f_lam
-        g_num = self.g_lam
-        trJ_num = self.trJ_lam
-        detJ_num = self.detJ_lam
+        """Ищет BT-точки численно через SciPy."""
+        f_num, g_num = self.f_lam, self.g_lam
+        trJ_num, detJ_num = self.trJ_lam, self.detJ_lam
 
         def F(vars):
             xv, yv, m1v, m2v = vars
@@ -276,13 +287,13 @@ class MainWindow(QMainWindow):
             sol = root(F, guess, method='hybr', tol=1e-8)
             if not sol.success:
                 continue
-            x_val, y_val, m1_val, m2_val = sol.x
-            if not (self.range['mu1_min'] <= m1_val <= self.range['mu1_max'] and
-                    self.range['mu2_min'] <= m2_val <= self.range['mu2_max']):
+            x0, y0, m1, m2 = sol.x
+            if not (self.range['mu1_min'] <= m1 <= self.range['mu1_max'] and
+                    self.range['mu2_min'] <= m2 <= self.range['mu2_max']):
                 continue
-            if any(np.hypot(m1_val - u[2], m2_val - u[3]) < 1e-6 for u in pts):
+            if any(np.hypot(m1 - u[2], m2 - u[3]) < 1e-6 for u in pts):
                 continue
-            pts.append((x_val, y_val, m1_val, m2_val))
+            pts.append((x0, y0, m1, m2))
 
         self.bt_pts = pts
         if not pts:
@@ -293,10 +304,35 @@ class MainWindow(QMainWindow):
                 print(f"{i:>2}:  x={x0:.6g}, y={y0:.6g}, μ1={u:.6g}, μ2={v:.6g}")
         print("-" * 50)
 
+    # -------------------- New: Detect limit cycle --------------------------- #
+    def _detect_limit_cycle(self, sol):
+        """Проверка решения sol на наличие предельного цикла.
+        Возвращает (xs, ys, period) или (None, None, None)."""
+        t = sol.t
+        x = sol.y[0]
+        y = sol.y[1]
+        crossings = []
+        for i in range(len(t) - 1):
+            if y[i] < 0 and y[i+1] >= 0:
+                frac = -y[i] / (y[i+1] - y[i])
+                crossings.append(t[i] + frac * (t[i+1] - t[i]))
+        if len(crossings) < 5:
+            return None, None, None
+        periods = np.diff(crossings)
+        last = periods[-3:]
+        if np.std(last) / np.mean(last) < 0.05:
+            T = np.mean(last)
+            t0, t1 = crossings[-2], crossings[-1]
+            mask = (t >= t0) & (t <= t1)
+            return x[mask], y[mask], T
+        return None, None, None
+
     # ----------------------- 4.2  UI-элементы ----------------------------- #
     def _build_toolbar(self):
         bar = self.addToolBar("Controls")
         bar.setIconSize(QSize(16, 16))
+
+        # Системные диалоги
         for txt, slot in (("Edit system", self._dlg_system),
                           ("Set param range", self._dlg_range),
                           ("Set phase range", self._dlg_phase)):
@@ -304,39 +340,98 @@ class MainWindow(QMainWindow):
             a.triggered.connect(slot)
             bar.addAction(a)
         bar.addSeparator()
+
+        # μ₁
         bar.addWidget(QLabel("μ₁:"))
         self.mu1_spin = QDoubleSpinBox(decimals=3)
+        self.mu1_spin.setRange(self.range["mu1_min"], self.range["mu1_max"])
         self.mu1_spin.valueChanged.connect(self._spin_changed)
         bar.addWidget(self.mu1_spin)
+
+        # μ₂
         bar.addWidget(QLabel("μ₂:"))
         self.mu2_spin = QDoubleSpinBox(decimals=3)
+        self.mu2_spin.setRange(self.range["mu2_min"], self.range["mu2_max"])
         self.mu2_spin.valueChanged.connect(self._spin_changed)
         bar.addWidget(self.mu2_spin)
+
         bar.addSeparator()
-        self.integrator_cb = QComboBox()
-        self.integrator_cb.addItems(["RK45", "RK23", "DOP853", "LSODA", "Radau", "BDF"])
+        # **Integrator**
+        bar.addSeparator()
+        # Выбор интегратора
         bar.addWidget(QLabel("Integrator:"))
+        self.integrator_cb = QComboBox()
+        self.integrator_cb.addItems(["RK23", "RK45", "DOP853", "LSODA", "Radau", "BDF"])
+        self.integrator_cb.setCurrentText("RK23")
         bar.addWidget(self.integrator_cb)
+
         bar.addSeparator()
+        # Время интеграции вперёд и назад
+        bar.addWidget(QLabel("T⁺:"))
+        self.time_fwd_spin = QDoubleSpinBox(decimals=1)
+        self.time_fwd_spin.setRange(0.1, 1000.0)
+        self.time_fwd_spin.setValue(15.0)
+        bar.addWidget(self.time_fwd_spin)
+
+        bar.addWidget(QLabel("T⁻:"))
+        self.time_bwd_spin = QDoubleSpinBox(decimals=1)
+        self.time_bwd_spin.setRange(0.1, 1000.0)
+        self.time_bwd_spin.setValue(15.0)
+        bar.addWidget(self.time_bwd_spin)
+
+        bar.addSeparator()
+        # Точность
+        bar.addWidget(QLabel("rtol:"))
+        self.rtol_spin = QDoubleSpinBox(decimals=6)
+        self.rtol_spin.setRange(1e-12, 1.0)
+        self.rtol_spin.setSingleStep(1e-6)
+        self.rtol_spin.setValue(1e-4)
+        bar.addWidget(self.rtol_spin)
+
+        bar.addWidget(QLabel("atol:"))
+        self.atol_spin = QDoubleSpinBox(decimals=6)
+        self.atol_spin.setRange(1e-15, 1.0)
+        self.atol_spin.setSingleStep(1e-10)
+        self.atol_spin.setValue(1e-7)
+        bar.addWidget(self.atol_spin)
+
+        bar.addSeparator()
+        # Clear
         btn = QPushButton("Clear")
         btn.clicked.connect(self._clear_traj)
         bar.addWidget(btn)
+
         bar.addSeparator()
+        # Векторное поле и сепаратрисы
         self.act_vector = QAction("Vector field", self, checkable=True)
         self.act_vector.triggered.connect(self._toggle_vect)
         bar.addAction(self.act_vector)
         self.act_sep = QAction("Separatrices", self, checkable=True)
         self.act_sep.triggered.connect(self._toggle_sep)
         bar.addAction(self.act_sep)
+
         bar.addSeparator()
+        # Отметить BT-точки
         self.act_bt = QAction("BT", self, checkable=True)
         self.act_bt.triggered.connect(self._toggle_bt)
         bar.addAction(self.act_bt)
+
         bar.addSeparator()
+        # Окно x(t)
         self.act_xt = QAction("Plot x(t)", self)
         self.act_xt.setEnabled(False)
         self.act_xt.triggered.connect(self._update_xt)
         bar.addAction(self.act_xt)
+
+        # Полоса прогресса (индетерминированная)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setVisible(False)
+        self.statusBar().addPermanentWidget(self.progress)
+
+        # для хранения графика предельного цикла
+        self.limit_cycle_line = None
+
 
     def _conf_param_axes(self):
         ax = self.param_canvas.ax
@@ -366,7 +461,6 @@ class MainWindow(QMainWindow):
     def _toggle_bt(self, chk):
         ax = self.bt_canvas.ax
         ax.clear()
-        # очистка таблицы
         self.bt_table.setRowCount(0)
         if chk:
             self.tabs.setCurrentIndex(self.bt_tab_index)
@@ -385,9 +479,7 @@ class MainWindow(QMainWindow):
                            linewidths=1.4,
                            label="BT")
                 ax.legend(loc="upper right", fontsize="small")
-                # заполнение таблицы
                 for x0, y0, m1, m2 in self.bt_pts:
-                    # собственные числа Якобиана
                     J = np.array([
                         [self.J11(x0, y0, m1, m2), self.J12(x0, y0, m1, m2)],
                         [self.J21(x0, y0, m1, m2), self.J22(x0, y0, m1, m2)]
@@ -403,250 +495,367 @@ class MainWindow(QMainWindow):
         self.bt_canvas.canvas.draw_idle()
 
     # ----------------------- 4.4  Спины/клики параметров ------------------ #
-    def _spin_changed(self,_=None):
-        μ1,μ2=self.mu1_spin.value(),self.mu2_spin.value()
-        self.current_mu=(μ1,μ2)
-        self._clear_traj(); self._toggle_sep(False)
-        if self.param_marker: self.param_marker.remove()
-        self.param_marker,=self.param_canvas.ax.plot(μ1,μ2,"xr",ms=8)
+    def _spin_changed(self, _=None):
+        # при смене параметров удаляем старый цикл
+        if self.limit_cycle_line is not None:
+            self.limit_cycle_line.remove()
+            self.limit_cycle_line = None
+            self.statusBar().clearMessage()
+
+        μ1, μ2 = self.mu1_spin.value(), self.mu2_spin.value()
+        self.current_mu = (μ1, μ2)
+        self._clear_traj()
+        self._toggle_sep(False)
+        if self.param_marker:
+            self.param_marker.remove()
+        self.param_marker, = self.param_canvas.ax.plot(μ1, μ2, "xr", ms=8)
         self.param_canvas.canvas.draw_idle()
-        self._draw_nullclines(μ1,μ2)
-        if self.show_field: self._draw_vect()
+        self._draw_nullclines(μ1, μ2)
+        if self.show_field:
+            self._draw_vect()
         self.statusBar().showMessage(f"μ=({μ1:.3g}, {μ2:.3g})")
 
-    def _param_click(self,e):
-        if not(e.inaxes and e.dblclick): return
-        μ1,μ2=e.xdata,e.ydata
-        self.mu1_spin.blockSignals(True); self.mu1_spin.setValue(μ1); self.mu1_spin.blockSignals(False)
-        self.mu2_spin.blockSignals(True); self.mu2_spin.setValue(μ2); self.mu2_spin.blockSignals(False)
+    def _param_click(self, e):
+        if not (e.inaxes and e.dblclick):
+            return
+        μ1, μ2 = e.xdata, e.ydata
+        self.mu1_spin.blockSignals(True)
+        self.mu1_spin.setValue(μ1)
+        self.mu1_spin.blockSignals(False)
+        self.mu2_spin.blockSignals(True)
+        self.mu2_spin.setValue(μ2)
+        self.mu2_spin.blockSignals(False)
         self._spin_changed()
 
-    # ----------------------- 4.5  Изоклины и равновесия ------------------- #
-    def _find_eq(self,μ1,μ2):
-        x_min,x_max=self.phase_range["x_min"],self.phase_range["x_max"]
-        y_min,y_max=self.phase_range["y_min"],self.phase_range["y_max"]
-        sols,tol_f,tol_xy=[],1e-4,1e-3
-        guesses=[(x0,y0) for x0 in np.linspace(x_min,x_max,10)
-                          for y0 in np.linspace(y_min,y_max,10)]
-        fg=lambda v:(self.f_lam(v[0],v[1],μ1,μ2),
-                     self.g_lam(v[0],v[1],μ1,μ2))
-        for x0,y0 in guesses:
-            sol=root(lambda v:[np.tanh(fg(v)[0]),np.tanh(fg(v)[1])],
-                     [x0,y0],method="hybr",options={"maxfev":200,"xtol":1e-6})
+    # ----------------------- 4.5  Изоклины и равновесие ------------------- #
+    def _find_eq(self, μ1, μ2):
+        x_min, x_max = self.phase_range["x_min"], self.phase_range["x_max"]
+        y_min, y_max = self.phase_range["y_min"], self.phase_range["y_max"]
+        sols, tol_f, tol_xy = [], 1e-4, 1e-3
+        guesses = [(x0, y0) for x0 in np.linspace(x_min, x_max, 10)
+                            for y0 in np.linspace(y_min, y_max, 10)]
+        fg = lambda v: (self.f_lam(v[0], v[1], μ1, μ2),
+                        self.g_lam(v[0], v[1], μ1, μ2))
+        for x0, y0 in guesses:
+            sol = root(lambda v: [np.tanh(fg(v)[0]), np.tanh(fg(v)[1])],
+                       [x0, y0], method="hybr",
+                       options={"maxfev": 200, "xtol": 1e-6})
             if sol.success:
-                xe,ye=sol.x
-                if max(abs(fg((xe,ye))[0]),abs(fg((xe,ye))[1]))>tol_f: continue
-                if any(np.hypot(xe-xs,ye-ys)<tol_xy for xs,ys in sols): continue
-                sols.append((xe,ye))
-        return [(round(x,6),round(y,6)) for x,y in sols]
+                xe, ye = sol.x
+                if max(abs(fg((xe, ye))[0]), abs(fg((xe, ye))[1])) > tol_f:
+                    continue
+                if any(np.hypot(xe - xs, ye - ys) < tol_xy for xs, ys in sols):
+                    continue
+                sols.append((xe, ye))
+        return [(round(x,6), round(y,6)) for x,y in sols]
 
-    def _draw_nullclines(self,μ1,μ2):
-        ax=self.phase_canvas.ax
+    def _draw_nullclines(self, μ1, μ2):
+        ax = self.phase_canvas.ax
         for cs in self.nullcline_art: cs.remove()
         for obj in self.nullcline_pts: obj.remove()
         self.nullcline_art.clear(); self.nullcline_pts.clear()
         self.eq_table.setRowCount(0); self.equilibria.clear()
 
-        xmin,xmax=ax.get_xlim(); ymin,ymax=ax.get_ylim()
-        xx,yy=np.meshgrid(np.linspace(xmin,xmax,300),
-                          np.linspace(ymin,ymax,300))
-        with np.errstate(over='ignore',invalid='ignore'):
-            F=self.f_lam(xx,yy,μ1,μ2); G=self.g_lam(xx,yy,μ1,μ2)
-        F=np.nan_to_num(F); G=np.nan_to_num(G)
-        cf = ax.contour(xx, yy, F, levels=[0], colors="blue", linestyles="--", linewidths=1.2)
-        cg = ax.contour(xx, yy, G, levels=[0], colors="green", linestyles="-", linewidths=1.2)
+        xmin, xmax = ax.get_xlim(); ymin, ymax = ax.get_ylim()
+        xx, yy = np.meshgrid(np.linspace(xmin, xmax, 300),
+                             np.linspace(ymin, ymax, 300))
+        with np.errstate(over='ignore', invalid='ignore'):
+            F = self.f_lam(xx, yy, μ1, μ2)
+            G = self.g_lam(xx, yy, μ1, μ2)
+        F = np.nan_to_num(F); G = np.nan_to_num(G)
+        cf = ax.contour(xx, yy, F, levels=[0],
+                        colors="blue", linestyles="--", linewidths=1.2)
+        cg = ax.contour(xx, yy, G, levels=[0],
+                        colors="green", linestyles="-", linewidths=1.2)
+        self.nullcline_art += [cf, cg]
 
-        self.nullcline_art+=[cf,cg]
-
-        for xf,yf in self._find_eq(μ1,μ2):
-            if not(xmin<=xf<=xmax and ymin<=yf<=ymax): continue
-            J11=float(self.J11(xf,yf,μ1,μ2)); J12=float(self.J12(xf,yf,μ1,μ2))
-            J21=float(self.J21(xf,yf,μ1,μ2)); J22=float(self.J22(xf,yf,μ1,μ2))
-            Jmat=np.array([[J11,J12],[J21,J22]])
-            tr,det=J11+J22,float(self.detJ_lam(xf,yf,μ1,μ2))
-            discr=tr*tr-4*det; eigvals,eigvecs=np.linalg.eig(Jmat)
-            tol=1e-6
-            if det<0: typ,color="saddle","red"
+        for xf, yf in self._find_eq(μ1, μ2):
+            if not(xmin <= xf <= xmax and ymin <= yf <= ymax):
+                continue
+            J11 = float(self.J11(xf, yf, μ1, μ2))
+            J12 = float(self.J12(xf, yf, μ1, μ2))
+            J21 = float(self.J21(xf, yf, μ1, μ2))
+            J22 = float(self.J22(xf, yf, μ1, μ2))
+            Jmat = np.array([[J11, J12], [J21, J22]])
+            tr, det = J11 + J22, float(self.detJ_lam(xf, yf, μ1, μ2))
+            discr = tr*tr - 4*det
+            eigvals, eigvecs = np.linalg.eig(Jmat)
+            tol = 1e-6
+            if det < 0:
+                typ, color = "saddle", "red"
             else:
-                if discr>tol: typ,color=("stable node","blue") if tr<0 else ("unstable node","cyan")
+                if discr > tol:
+                    typ, color = ("stable node", "blue") if tr < 0 else ("unstable node", "cyan")
                 else:
-                    if abs(tr)<tol: typ,color="center","green"
-                    elif tr<0: typ,color="stable focus","purple"
-                    else: typ,color="unstable focus","magenta"
-            pt,=ax.plot(xf,yf,"o",color=color,ms=8)
-            txt=ax.text(xf,yf,typ,color=color,fontsize="small",va="bottom",ha="right")
-            self.nullcline_pts+=[pt,txt]
+                    if abs(tr) < tol:
+                        typ, color = "center", "green"
+                    elif tr < 0:
+                        typ, color = "stable focus", "purple"
+                    else:
+                        typ, color = "unstable focus", "magenta"
+            pt, = ax.plot(xf, yf, "o", color=color, ms=8)
+            txt = ax.text(xf, yf, typ, color=color,
+                          fontsize="small", va="bottom", ha="right")
+            self.nullcline_pts += [pt, txt]
 
-            row=self.eq_table.rowCount(); self.eq_table.insertRow(row)
-            for col,val in enumerate((xf,yf,typ,*eigvals)):
-                self.eq_table.setItem(row,col,QTableWidgetItem(f"{val:.6g}" if isinstance(val,float) else str(val)))
+            row = self.eq_table.rowCount()
+            self.eq_table.insertRow(row)
+            for col, val in enumerate((xf, yf, typ, *eigvals)):
+                item = QTableWidgetItem(f"{val:.6g}" if isinstance(val, float) else str(val))
+                self.eq_table.setItem(row, col, item)
 
-            self.equilibria.append({'x':xf,'y':yf,'type':typ,'eigvals':eigvals,'eigvecs':eigvecs})
+            self.equilibria.append({
+                'x': xf, 'y': yf, 'type': typ,
+                'eigvals': eigvals, 'eigvecs': eigvecs
+            })
 
         ax.legend(handles=[
-            Line2D([],[],marker="o",color="red",linestyle="",label="saddle"),
-            Line2D([],[],marker="o",color="blue",linestyle="",label="stable node"),
-            Line2D([],[],marker="o",color="cyan",linestyle="",label="unstable node"),
-            Line2D([],[],marker="o",color="purple",linestyle="",label="stable focus"),
-            Line2D([],[],marker="o",color="magenta",linestyle="",label="unstable focus"),
-            Line2D([],[],marker="o",color="green",linestyle="",label="center")
-        ],fontsize="small",loc="upper right")
+            Line2D([], [], marker="o", color="red", linestyle="", label="saddle"),
+            Line2D([], [], marker="o", color="blue", linestyle="", label="stable node"),
+            Line2D([], [], marker="o", color="cyan", linestyle="", label="unstable node"),
+            Line2D([], [], marker="o", color="purple", linestyle="", label="stable focus"),
+            Line2D([], [], marker="o", color="magenta", linestyle="", label="unstable focus"),
+            Line2D([], [], marker="o", color="green", linestyle="", label="center")
+        ], fontsize="small", loc="upper right")
         self.phase_canvas.canvas.draw_idle()
 
-    # ----------------------- 4.6  Векторное поле/сепаратрисы -------------- #
-    def _toggle_vect(self,chk):
-        self.show_field=chk
+    # -------------------- 4.6  Векторное поле/сепаратрисы --------------- #
+    def _toggle_vect(self, chk):
+        self.show_field = chk
         (self._draw_vect() if chk else self._clear_vect())
 
     def _clear_vect(self):
         for art in self.field_art: art.remove()
-        self.field_art.clear(); self.phase_canvas.canvas.draw_idle()
+        self.field_art.clear()
+        self.phase_canvas.canvas.draw_idle()
 
     def _draw_vect(self):
         self._clear_vect()
-        if not self.current_mu:return
-        μ1,μ2=self.current_mu; ax=self.phase_canvas.ax
-        XX,YY=np.meshgrid(np.linspace(*ax.get_xlim(),20),
-                          np.linspace(*ax.get_ylim(),20))
-        U=self.f_lam(XX,YY,μ1,μ2); V=self.g_lam(XX,YY,μ1,μ2)
-        M=np.hypot(U,V); M[M==0]=1
-        Q=ax.quiver(XX,YY,U/M,V/M,angles="xy",pivot="mid",alpha=0.6)
-        self.field_art.append(Q); self.phase_canvas.canvas.draw_idle()
+        if not self.current_mu:
+            return
+        μ1, μ2 = self.current_mu
+        ax = self.phase_canvas.ax
+        XX, YY = np.meshgrid(np.linspace(*ax.get_xlim(), 20),
+                             np.linspace(*ax.get_ylim(), 20))
+        U = self.f_lam(XX, YY, μ1, μ2)
+        V = self.g_lam(XX, YY, μ1, μ2)
+        M = np.hypot(U, V)
+        M[M == 0] = 1
+        Q = ax.quiver(XX, YY, U/M, V/M, angles="xy", pivot="mid", alpha=0.6)
+        self.field_art.append(Q)
+        self.phase_canvas.canvas.draw_idle()
 
-    def _toggle_sep(self,chk):
+    # -------------------- 4.7  Сепаратрисы ------------------------------- #
+    def _toggle_sep(self, chk):
         (self._draw_sep() if chk else self._clear_sep())
 
     def _clear_sep(self):
-        for ln in self.sep_lines: ln.remove()
-        self.sep_lines.clear(); self.phase_canvas.canvas.draw_idle()
+        for ln in self.sep_lines:
+            ln.remove()
+        self.sep_lines.clear()
+        self.phase_canvas.canvas.draw_idle()
 
     def _draw_sep(self):
         self._clear_sep()
-        if not self.current_mu:return
-        μ1,μ2=self.current_mu; ax=self.phase_canvas.ax
+        if not self.current_mu:
+            return
+        μ1, μ2 = self.current_mu
+        ax = self.phase_canvas.ax
         for eq in self.equilibria:
-            if eq['type']!="saddle": continue
-            x0,y0=eq['x'],eq['y']; ev,vec=eq['eigvals'],eq['eigvecs']
-            for i in (0,1):
-                lam=float(np.real(ev[i])); v=np.real_if_close(vec[:,i])
-                if abs(lam)<1e-4: continue
-                v/=np.linalg.norm(v)
-                for sgn in (+1,-1):
-                    start=np.array([x0,y0])+sgn*5e-3*v
-                    span=(0,6) if lam>0 else (0,-6)
-                    sol=solve_ivp(lambda t,y:self.rhs_func(t,y,μ1,μ2),
-                                  span,start,max_step=0.2,rtol=1e-4,atol=1e-7)
-                    ln,=ax.plot(sol.y[0],sol.y[1],'k--',lw=1)
+            if eq['type'] != "saddle":
+                continue
+            x0, y0 = eq['x'], eq['y']
+            ev, vec = eq['eigvals'], eq['eigvecs']
+            for i in (0, 1):
+                lam = float(np.real(ev[i]))
+                v = np.real_if_close(vec[:, i])
+                if abs(lam) < 1e-4:
+                    continue
+                v /= np.linalg.norm(v)
+                for sgn in (+1, -1):
+                    start = np.array([x0, y0]) + sgn * 5e-3 * v
+                    span = (0, 60) if lam > 0 else (0, -60)
+                    sol = solve_ivp(lambda t, y: self.rhs_func(t, y, μ1, μ2),
+                                    span, start,
+                                    max_step=0.2, rtol=1e-4, atol=1e-7)
+                    ln, = ax.plot(sol.y[0], sol.y[1], 'k--', lw=1)
                     self.sep_lines.append(ln)
         self.phase_canvas.canvas.draw_idle()
 
-    # ----------------------- 4.7  Клики по фазовой плоскости -------------- #
-    def _phase_click(self,e):
-        ax=self.phase_canvas.ax
-        if e.button==3 and e.inaxes==ax: self._del_traj(e.xdata,e.ydata); return
-        if e.button!=1 or not e.dblclick or not self.current_mu: return
-        x0,y0=e.xdata,e.ydata; μ1,μ2=self.current_mu
-        method=self.integrator_cb.currentText()
+    # -------------------- 4.8  Клики по фазовой плоскости -------------- #
+    def _phase_click(self, e):
+        ax = self.phase_canvas.ax
+        if e.button == 3 and e.inaxes == ax:
+            self._del_traj(e.xdata, e.ydata)
+            return
+        if e.button != 1 or not e.dblclick or not self.current_mu:
+            return
 
-        def rhs_sat(t,s):
-            dx,dy=self.rhs_func(t,s,μ1,μ2)
-            if not np.isfinite(dx) or not np.isfinite(dy): return np.array([0,0])
-            vmax=1e3; v=np.hypot(dx,dy)
-            return np.array([dx,dy])*(vmax/v if v>vmax else 1)
+        x0, y0 = e.xdata, e.ydata
+        μ1, μ2 = self.current_mu
+        method = self.integrator_cb.currentText()
 
-        cx=(self.phase_range["x_min"]+self.phase_range["x_max"])/2
-        cy=(self.phase_range["y_min"]+self.phase_range["y_max"])/2
-        rx=(self.phase_range["x_max"]-self.phase_range["x_min"])/2
-        ry=(self.phase_range["y_max"]-self.phase_range["y_min"])/2
-        def stop(t,s): return max(abs(s[0]-cx)-rx,abs(s[1]-cy)-ry)
-        stop.terminal=True
+        # новые спины для времени
+        T_fwd = float(self.time_fwd_spin.value())
+        T_bwd = float(self.time_bwd_spin.value())
+        max_step = max(T_fwd, T_bwd) / 100.0
 
-        T,N=15,300
-        sol_f=solve_ivp(rhs_sat,(0,T),[x0,y0],t_eval=np.linspace(0,T,N//2),
-                        method=method,max_step=0.2,rtol=1e-4,atol=1e-7,events=stop)
-        sol_b=solve_ivp(rhs_sat,(0,-T),[x0,y0],t_eval=np.linspace(0,-T,N//2),
-                        method=method,max_step=0.2,rtol=1e-4,atol=1e-7,events=stop)
-        xs=np.concatenate([sol_b.y[0][::-1][:-1],sol_f.y[0]])
-        ys=np.concatenate([sol_b.y[1][::-1][:-1],sol_f.y[1]])
-        color=next(self.color_cycle); ln,=ax.plot(xs,ys,color=color)
+        rtol = float(self.rtol_spin.value())
+        atol = float(self.atol_spin.value())
+
+        def rhs_sat(t, s):
+            dx, dy = self.rhs_func(t, s, μ1, μ2)
+            if not np.isfinite(dx + dy):
+                return np.zeros(2)
+            v = np.hypot(dx, dy)
+            return np.array([dx, dy]) if v < 1e3 else np.array([dx * 1e3 / v, dy * 1e3 / v])
+
+        self.progress.setVisible(True)
+
+        sol_f = solve_ivp(rhs_sat, (0, T_fwd), [x0, y0],
+                          method=method, max_step=max_step,
+                          rtol=rtol, atol=atol)
+        sol_b = solve_ivp(rhs_sat, (0, -T_bwd), [x0, y0],
+                          method=method, max_step=max_step,
+                          rtol=rtol, atol=atol)
+
+        self.progress.setVisible(False)
+
+        # удаляем предыдущий цикл
+        if self.limit_cycle_line:
+            self.limit_cycle_line.remove()
+            self.limit_cycle_line = None
+
+        xs_c, ys_c, period = self._detect_limit_cycle(sol_f)
+        if xs_c is not None:
+            line, = ax.plot(xs_c, ys_c, linewidth=2.5, label="Limit cycle")
+            self.limit_cycle_line = line
+            self.statusBar().showMessage(f"Обнаружен предельный цикл, T ≈ {period:.3g}")
+            ax.legend(fontsize="small")
+
+        xs = np.concatenate([sol_b.y[0][::-1], sol_f.y[0]])
+        ys = np.concatenate([sol_b.y[1][::-1], sol_f.y[1]])
+        color = next(self.color_cycle)
+        ln, = ax.plot(xs, ys, color=color)
         self.traj_lines.append(ln)
-        t_full=np.concatenate([sol_b.t[::-1][:-1],sol_f.t])
-        self.xt_data.append((t_full,xs,color))
+        t_full = np.concatenate([sol_b.t[::-1], sol_f.t])
+        self.xt_data.append((t_full, xs, color))
+
         self.phase_canvas.canvas.draw_idle()
         self.act_xt.setEnabled(True)
-        if self.xt_fig: self._update_xt()
+        if self.xt_fig:
+            self._update_xt()
 
-    # ----------------------- 4.8  Управление траекториями ----------------- #
-    def _del_traj(self,x,y):
-        if not self.traj_lines:return
-        ax=self.phase_canvas.ax
-        thresh=0.05*max(ax.get_xlim()[1]-ax.get_xlim()[0],
-                        ax.get_ylim()[1]-ax.get_ylim()[0])
-        for i,ln in enumerate(self.traj_lines):
-            if np.min(np.hypot(ln.get_xdata()-x,ln.get_ydata()-y))<thresh:
-                ln.remove(); self.traj_lines.pop(i); self.xt_data.pop(i)
+    # -------------------- 4.9  Управление траекториями ----------------- #
+    def _del_traj(self, x, y):
+        if not self.traj_lines:
+            return
+        ax = self.phase_canvas.ax
+        thresh = 0.05 * max(
+            ax.get_xlim()[1] - ax.get_xlim()[0],
+            ax.get_ylim()[1] - ax.get_ylim()[0]
+        )
+        for i, ln in enumerate(self.traj_lines):
+            if np.min(np.hypot(ln.get_xdata() - x,
+                                ln.get_ydata() - y)) < thresh:
+                ln.remove()
+                self.traj_lines.pop(i)
+                self.xt_data.pop(i)
                 self.phase_canvas.canvas.draw_idle()
-                if self.xt_fig: self._update_xt() if self.traj_lines else self._clear_xt()
+                if self.xt_fig:
+                    if self.traj_lines:
+                        self._update_xt()
+                    else:
+                        self._clear_xt()
                 break
 
     def _clear_traj(self):
-        for ln in self.traj_lines: ln.remove()
-        self.traj_lines.clear(); self.xt_data.clear()
-        self.phase_canvas.canvas.draw_idle(); self._clear_xt()
+        # убираем все траектории
+        for ln in self.traj_lines:
+            ln.remove()
+        self.traj_lines.clear()
+        self.xt_data.clear()
+        # убираем предельный цикл, если есть
+        if self.limit_cycle_line is not None:
+            self.limit_cycle_line.remove()
+            self.limit_cycle_line = None
+        self.phase_canvas.canvas.draw_idle()
+        self._clear_xt()
         self.act_xt.setEnabled(False)
+        self.statusBar().clearMessage()
 
-    # ----------------------- 4.9  x(t) окно -------------------------------- #
+    # -------------------- 4.10  x(t) окно ------------------------------- #
     def _update_xt(self):
-        if not self.xt_data:return
+        if not self.xt_data:
+            return
         if not self.xt_fig:
-            self.xt_fig,self.xt_ax=plt.subplots()
-            self.xt_ax.set_xlabel("t"); self.xt_ax.set_ylabel("x(t)")
-        self.xt_ax.cla(); self.xt_ax.set_title("x(t) for all trajectories")
-        for t,x,color in self.xt_data: self.xt_ax.plot(t,x,color=color)
-        self.xt_fig.canvas.draw_idle(); self.xt_fig.show()
+            self.xt_fig, self.xt_ax = plt.subplots()
+            self.xt_ax.set_xlabel("t")
+            self.xt_ax.set_ylabel("x(t)")
+        self.xt_ax.cla()
+        self.xt_ax.set_title("x(t) for all trajectories")
+        for t, x, color in self.xt_data:
+            self.xt_ax.plot(t, x, color=color)
+        self.xt_fig.canvas.draw_idle()
+        self.xt_fig.show()
 
     def _clear_xt(self):
         if self.xt_fig:
-            self.xt_ax.cla(); self.xt_ax.set_title("x(t) for all trajectories")
-            self.xt_ax.set_xlabel("t"); self.xt_ax.set_ylabel("x(t)")
+            self.xt_ax.cla()
+            self.xt_ax.set_title("x(t) for all trajectories")
+            self.xt_ax.set_xlabel("t")
+            self.xt_ax.set_ylabel("x(t)")
             self.xt_fig.canvas.draw_idle()
 
-    # ----------------------- 4.10  Диалоги -------------------------------- #
+    # -------------------- 4.11  Диалоги ------------------------------- #
     def _dlg_system(self):
-        dlg=SystemDialog(self.f_expr,self.g_expr,self)
+        dlg = SystemDialog(self.f_expr, self.g_expr, self)
         if dlg.exec():
-            self.f_expr,self.g_expr=dlg.texts()
+            self.f_expr, self.g_expr = dlg.texts()
             try:
                 self._compile_system()
-                if self.current_mu: self._draw_nullclines(*self.current_mu)
-                if self.show_field: self._draw_vect()
-                if self.act_sep.isChecked(): self._draw_sep()
-                if self.act_bt.isChecked(): self._toggle_bt(True)
+                if self.current_mu:
+                    self._draw_nullclines(*self.current_mu)
+                if self.show_field:
+                    self._draw_vect()
+                if self.act_sep.isChecked():
+                    self._draw_sep()
+                if self.act_bt.isChecked():
+                    self._toggle_bt(True)
                 self.statusBar().showMessage("System updated")
-            except Exception as e: QMessageBox.critical(self,"Error",str(e))
+            except Exception as e:
+                QMessageBox.critical(self, "Error", str(e))
 
     def _dlg_range(self):
-        dlg=RangeDialog(self.range,self)
+        dlg = RangeDialog(self.range, self)
         if dlg.exec():
-            self.range=dlg.values()
-            self.mu1_spin.setRange(self.range["mu1_min"],self.range["mu1_max"])
-            self.mu2_spin.setRange(self.range["mu2_min"],self.range["mu2_max"])
-            self._compile_system(); self._conf_param_axes()
-            if self.act_bt.isChecked(): self._toggle_bt(True)
+            self.range = dlg.values()
+            self.mu1_spin.setRange(self.range["mu1_min"],
+                                   self.range["mu1_max"])
+            self.mu2_spin.setRange(self.range["mu2_min"],
+                                   self.range["mu2_max"])
+            self._compile_system()
+            self._conf_param_axes()
+            if self.act_bt.isChecked():
+                self._toggle_bt(True)
 
     def _dlg_phase(self):
-        dlg=PhaseRangeDialog(self.phase_range,self)
+        dlg = PhaseRangeDialog(self.phase_range, self)
         if dlg.exec():
-            self.phase_range=dlg.values(); self._conf_phase_axes()
-            if self.current_mu: self._draw_nullclines(*self.current_mu)
+            self.phase_range = dlg.values()
+            self._conf_phase_axes()
+            if self.current_mu:
+                self._draw_nullclines(*self.current_mu)
+
 
 # --------------------------------------------------------------------------- #
 # main                                                                        #
 # --------------------------------------------------------------------------- #
 def main():
-    app=QApplication(sys.argv)
-    win=MainWindow(); win.show()
+    app = QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
     sys.exit(app.exec())
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()

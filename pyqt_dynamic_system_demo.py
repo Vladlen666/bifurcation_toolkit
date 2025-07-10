@@ -150,11 +150,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Dynamic-System Sandbox — BT only")
-        self.resize(1100, 650)
+        self.resize(1500, 650)
 
         # — диапазоны и формулы системы —
         self.range = dict(mu1_min=-15, mu1_max=15, mu2_min=-15, mu2_max=15)
-        self.phase_range = dict(x_min=-15, x_max=15, y_min=-15, y_max=15)
+        self.phase_range = dict(x_min=-5, x_max=15, y_min=-2, y_max=2)
         self.f_expr = "-2*exp(-x) + exp(-2*x) + y"
         self.g_expr = "(-x + mu2*y + mu1)*0.01"
 
@@ -391,13 +391,13 @@ class MainWindow(QMainWindow):
 
         bar.addSeparator()
         bar.addWidget(QLabel("t₀:"))
-        self.t0_spin = QDoubleSpinBox(decimals=1, minimum=-1000, maximum=1000)
-        self.t0_spin.setValue(0.0)
+        self.t0_spin = QDoubleSpinBox(decimals=1, minimum=-10000, maximum=10000)
+        self.t0_spin.setValue(-1000.0)
         bar.addWidget(self.t0_spin)
 
         bar.addWidget(QLabel("t₁:"))
-        self.t1_spin = QDoubleSpinBox(decimals=1, minimum=-1000, maximum=1000)
-        self.t1_spin.setValue(15.0)
+        self.t1_spin = QDoubleSpinBox(decimals=1, minimum=-10000, maximum=10000)
+        self.t1_spin.setValue(1000.0)
         bar.addWidget(self.t1_spin)
 
         bar.addSeparator()
@@ -539,8 +539,8 @@ class MainWindow(QMainWindow):
             G = np.nan_to_num(self.g_lam(xx, yy, μ1, μ2))
 
         # Рисуем нулевые кривые (изоклины)
-        cf = ax.contour(xx, yy, F, levels=[0], colors="blue", linestyles="--", linewidths=1.2)
-        cg = ax.contour(xx, yy, G, levels=[0], colors="green", linestyles="-", linewidths=1.2)
+        cf = ax.contour(xx, yy, F, levels=[0], colors="blue", linestyles="--", linewidths=2)
+        cg = ax.contour(xx, yy, G, levels=[0], colors="green", linestyles="--", linewidths=2)
         self.nullcline_art.extend([cf, cg])
 
         # Рисуем равновесия
@@ -606,8 +606,8 @@ class MainWindow(QMainWindow):
         xmin, xmax = self.phase_range["x_min"], self.phase_range["x_max"]
         ymin, ymax = self.phase_range["y_min"], self.phase_range["y_max"]
         xx, yy = np.meshgrid(
-            np.linspace(xmin, xmax, 300),
-            np.linspace(ymin, ymax, 300)
+            np.linspace(xmin, xmax, 1000),
+            np.linspace(ymin, ymax, 1000)
         )
 
         # F и G
@@ -629,18 +629,18 @@ class MainWindow(QMainWindow):
             discr = tr * tr - 4 * det
 
             if det < 0:
-                color = "red"
+                color = "black"
             else:
                 if discr > 1e-6:
-                    color = "blue" if tr < 0 else "cyan"
+                    color = "black" if tr < 0 else "black"
                 else:
-                    color = "green" if abs(tr) < 1e-6 else ("purple" if tr < 0 else "magenta")
+                    color = "black" if abs(tr) < 1e-6 else ("black" if tr < 0 else "black")
 
             ax.plot(xf, yf, "o", color=color, ms=8)
 
         ax.set_xlim(xmin, xmax)
         ax.set_ylim(ymin, ymax)
-        ax.set_title("Phase plane")
+        # ax.set_title("Phase plane")
         ax.set_xlabel("x")
         ax.set_ylabel("y")
 
@@ -763,45 +763,84 @@ class MainWindow(QMainWindow):
         if e.button == 3 and e.inaxes == ax:
             self._del_traj(e.xdata, e.ydata)
             return
-        # двойной левый — интегрируем
+        # двойной левый — интегрируем только если заданы параметры
         if e.button != 1 or not e.dblclick or not self.current_mu:
             return
 
         x0, y0 = e.xdata, e.ydata
         μ1, μ2 = self.current_mu
-        method = self.integrator_cb.currentText()
 
+        # ограничивающая правая часть
         def rhs_sat(t, s):
             dx, dy = self.rhs_func(t, s, μ1, μ2)
-            vmax = 1e3;
+            vmax = 1e3
             v = np.hypot(dx, dy)
             return np.array([dx, dy]) * (vmax / v if v > vmax else 1)
 
-        t0 = float(self.t0_spin.value());
+        # считываем спинбоксы
+        t0 = float(self.t0_spin.value())
         t1 = float(self.t1_spin.value())
-        t_eval = np.linspace(t0, t1, 300)
-        rtol = float(self.rtol_spin.value());
+        rtol = float(self.rtol_spin.value())
         atol = float(self.atol_spin.value())
+        method = self.integrator_cb.currentText()
 
-        sol = solve_ivp(rhs_sat, (t0, t1), [x0, y0],
-                        method=method, t_eval=t_eval,
-                        max_step=0.2, rtol=rtol, atol=atol)
+        # формируем сетки для интегрирования
+        N = 1000
+        t_full = np.linspace(t0, t1, N)
+        t_bwd = t_full[t_full <= 0]
+        t_fwd = t_full[t_full >= 0]
 
-        xs, ys = sol.y[0], sol.y[1]
+        # интегрирование «назад»: 0 → t0
+        sol_bwd = solve_ivp(
+            rhs_sat,
+            (0, t0),
+            [x0, y0],
+            method=method,
+            t_eval=t_bwd[::-1],  # перевёрнутый массив
+            rtol=rtol,
+            atol=atol,
+            max_step=0.1
+        )
+
+        # интегрирование «вперёд»: 0 → t1
+        sol_fwd = solve_ivp(
+            rhs_sat,
+            (0, t1),
+            [x0, y0],
+            method=method,
+            t_eval=t_fwd,
+            rtol=rtol,
+            atol=atol,
+            max_step=0.1
+        )
+
+        # восстанавливаем порядок для «назад»
+        tb = sol_bwd.t[::-1]
+        xb, yb = sol_bwd.y[0][::-1], sol_bwd.y[1][::-1]
+
+        # «вперёд» (пропускаем дублирующий t=0)
+        tf = sol_fwd.t
+        xf, yf = sol_fwd.y
+
+        # склеиваем всю траекторию
+        t_vals = np.concatenate([tb, tf[1:]])
+        xs = np.concatenate([xb, xf[1:]])
+        ys = np.concatenate([yb, yf[1:]])
+
         color = next(self.color_cycle)
 
         # рисуем на основном холсте
         ln, = ax.plot(xs, ys, color=color)
         self.traj_lines.append(ln)
 
-        # рисуем дублирующую траекторию в окне-диалоге
+        # рисуем в окне-диалоге
         axw = self.phase_xt_window.ax_phase
         ln_win, = axw.plot(xs, ys, color=color)
         self.traj_lines_win.append(ln_win)
         self.phase_xt_window.canvas.draw_idle()
 
-        # сохраняем для x(t)
-        self.xt_data.append((sol.t, xs, color))
+        # сохраняем данные для x(t) и обновляем график x(t)
+        self.xt_data.append((t_vals, xs, color))
         self._update_xt()
 
         self.phase_canvas.canvas.draw_idle()
@@ -860,9 +899,9 @@ class MainWindow(QMainWindow):
         # окно–диалог
         axw = self.phase_xt_window.ax_xt
         axw.clear()
-        axw.set_title("x(t) (window)")
+        # axw.set_title("x(t) (window)")
         axw.set_xlabel("t");
-        axw.set_ylabel("x(t)")
+        axw.set_ylabel("x")
         for t_vals, x_vals, color in self.xt_data:
             axw.plot(t_vals, x_vals, color=color)
         self.phase_xt_window.canvas.draw_idle()

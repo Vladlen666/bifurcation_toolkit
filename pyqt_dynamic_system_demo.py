@@ -128,7 +128,7 @@ class PhaseXTDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Phase & x(t)")
-        self.resize(900, 400)
+        self.resize(900, 500)
 
         # создаём единый Figure с двумя осями
         self.fig, (self.ax_phase, self.ax_xt) = plt.subplots(1, 2, figsize=(9, 4))
@@ -174,6 +174,7 @@ class MainWindow(QMainWindow):
         self.field_art   = []
         self.field_art_win = []
         self.sep_lines   = []
+        self.sep_lines_win = []
         self.equilibria  = []
         self.show_field  = False
         self.param_marker = None
@@ -392,7 +393,7 @@ class MainWindow(QMainWindow):
         bar.addSeparator()
         bar.addWidget(QLabel("t₀:"))
         self.t0_spin = QDoubleSpinBox(decimals=1, minimum=-10000, maximum=10000)
-        self.t0_spin.setValue(-1000.0)
+        self.t0_spin.setValue(-10.0)
         bar.addWidget(self.t0_spin)
 
         bar.addWidget(QLabel("t₁:"))
@@ -580,7 +581,17 @@ class MainWindow(QMainWindow):
                 text = f"{v:.6g}" if isinstance(v, (int, float, np.floating)) else str(v)
                 self.eq_table.setItem(row, col, QTableWidgetItem(text))
 
-            self.equilibria.append({'x': xf, 'y': yf, 'type': typ})
+            M = np.array([[J11, J12],
+                          [J21, J22]])
+            ev, vec = np.linalg.eig(M)
+
+            self.equilibria.append({
+                'x': xf,
+                'y': yf,
+                'type': typ,
+                'eigvals': ev,  # массив собственных значений
+                'eigvecs': vec  # матрица (2×2) собственных векторов
+            })
 
         ax.legend(handles=[
             Line2D([], [], marker="o", color="red", linestyle="", label="saddle"),
@@ -616,8 +627,8 @@ class MainWindow(QMainWindow):
             G = np.nan_to_num(self.g_lam(xx, yy, μ1, μ2))
 
         # Рисуем нулевые кривые
-        ax.contour(xx, yy, F, levels=[0], colors="blue", linestyles="--", linewidths=1.2)
-        ax.contour(xx, yy, G, levels=[0], colors="green", linestyles="-", linewidths=1.2)
+        ax.contour(xx, yy, F, levels=[0], colors="blue", linestyles="--", linewidths=2)
+        ax.contour(xx, yy, G, levels=[0], colors="green", linestyles="--", linewidths=2)
 
         # Рисуем равновесия
         for xf, yf in self._find_eq(μ1, μ2):
@@ -732,30 +743,77 @@ class MainWindow(QMainWindow):
         else: self._clear_sep()
 
     def _clear_sep(self):
-        for ln in self.sep_lines: ln.remove()
-        self.sep_lines=[];self.phase_canvas.canvas.draw_idle()
+        """
+        Убирает все сепаратрисы с основного холста и из окна Phase & x(t).
+        """
+        # Основной холст
+        for ln in self.sep_lines:
+            ln.remove()
+        self.sep_lines.clear()
+
+        # Окно Phase & x(t)
+        for ln in self.sep_lines_win:
+            ln.remove()
+        self.sep_lines_win.clear()
+
+        # Перерисовать оба холста
+        self.phase_canvas.canvas.draw_idle()
+        self.phase_xt_window.canvas.draw_idle()
 
     def _draw_sep(self):
+        """
+        Строит сепаратрисы (по седловым равновесиям) на основном холсте
+        и дублирует их в окно Phase & x(t).
+        """
+        # Сначала очищаем предыдущие сепаратрисы
         self._clear_sep()
-        if not self.current_mu: return
-        μ1,μ2=self.current_mu;ax=self.phase_canvas.ax
+
+        if not self.current_mu:
+            return
+
+        μ1, μ2 = self.current_mu
+        ax_main = self.phase_canvas.ax
+        ax_win = self.phase_xt_window.ax_phase
+
+        # Проходим по всем равновесиям
         for eq in self.equilibria:
-            if eq['type']!="saddle": continue
-            x0,y0=eq['x'],eq['y'];ev,vec=eq['eigvals'],eq['eigvecs']
-            for i in (0,1):
-                lam=float(np.real(ev[i]));v=np.real_if_close(vec[:,i])
-                if abs(lam)<1e-4: continue
-                v/=np.linalg.norm(v)
-                for sgn in (+1,-1):
-                    start=np.array([x0,y0])+sgn*5e-3*v
-                    span=(0,60) if lam>0 else (0,-60)
-                    sol=solve_ivp(lambda t,s: self.rhs_func(t,s,μ1,μ2),
-                                  span,start,max_step=0.2,
-                                  rtol=float(self.rtol_spin.value()),
-                                  atol=float(self.atol_spin.value()))
-                    ln,=ax.plot(sol.y[0],sol.y[1],'k--',lw=1)
-                    self.sep_lines.append(ln)
+            if eq['type'] != "saddle":
+                continue
+            x0, y0 = eq['x'], eq['y']
+            ev, vec = eq['eigvals'], eq['eigvecs']
+
+            # Для каждого собственного направления
+            for i in (0, 1):
+                lam = float(np.real(ev[i]))
+                v = np.real_if_close(vec[:, i])
+                if abs(lam) < 1e-4:
+                    continue
+                v = v / np.linalg.norm(v)
+
+                for sgn in (+1, -1):
+                    start = np.array([x0, y0]) + sgn * 5e-3 * v
+                    span = (0, 60) if lam > 0 else (0, -60)
+
+                    sol = solve_ivp(
+                        lambda t, s: self.rhs_func(t, s, μ1, μ2),
+                        span,
+                        start,
+                        max_step=0.2,
+                        rtol=float(self.rtol_spin.value()),
+                        atol=float(self.atol_spin.value())
+                    )
+
+                    # На основном холсте
+                    ln_main, = ax_main.plot(sol.y[0], sol.y[1], 'k--', lw=1)
+                    self.sep_lines.append(ln_main)
+
+                    # И в окне Phase & x(t)
+                    ln_win, = ax_win.plot(sol.y[0], sol.y[1], 'k--', lw=1)
+                    self.sep_lines_win.append(ln_win)
+
+        # Перерисовать оба холста
         self.phase_canvas.canvas.draw_idle()
+        self.phase_xt_window.canvas.draw_idle()
 
     def _phase_click(self, e):
         ax = self.phase_canvas.ax
@@ -850,7 +908,7 @@ class MainWindow(QMainWindow):
         if not self.traj_lines:
             return
         ax = self.phase_canvas.ax
-        thresh = 0.05 * max(ax.get_xlim()[1] - ax.get_xlim()[0],
+        thresh = 0.01 * max(ax.get_xlim()[1] - ax.get_xlim()[0],
                             ax.get_ylim()[1] - ax.get_ylim()[0])
         for i, ln in enumerate(self.traj_lines):
             if np.min(np.hypot(ln.get_xdata() - x, ln.get_ydata() - y)) < thresh:
@@ -900,8 +958,8 @@ class MainWindow(QMainWindow):
         axw = self.phase_xt_window.ax_xt
         axw.clear()
         # axw.set_title("x(t) (window)")
-        axw.set_xlabel("t");
-        axw.set_ylabel("x")
+        axw.set_xlabel("Время, t");
+        axw.set_ylabel("x(t)")
         for t_vals, x_vals, color in self.xt_data:
             axw.plot(t_vals, x_vals, color=color)
         self.phase_xt_window.canvas.draw_idle()

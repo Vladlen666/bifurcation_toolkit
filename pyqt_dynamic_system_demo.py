@@ -373,13 +373,13 @@ class MainWindow(QMainWindow):
         bar.addSeparator()
 
         bar.addWidget(QLabel("μ₁:"))
-        self.mu1_spin=QDoubleSpinBox(decimals=3)
+        self.mu1_spin=QDoubleSpinBox(decimals=6)
         self.mu1_spin.setRange(self.range["mu1_min"],self.range["mu1_max"])
         self.mu1_spin.valueChanged.connect(self._spin_changed)
         bar.addWidget(self.mu1_spin)
 
         bar.addWidget(QLabel("μ₂:"))
-        self.mu2_spin=QDoubleSpinBox(decimals=3)
+        self.mu2_spin=QDoubleSpinBox(decimals=6)
         self.mu2_spin.setRange(self.range["mu2_min"],self.range["mu2_max"])
         self.mu2_spin.valueChanged.connect(self._spin_changed)
         bar.addWidget(self.mu2_spin)
@@ -491,7 +491,7 @@ class MainWindow(QMainWindow):
         if self.show_field:
             self._draw_window_field(μ1, μ2)
 
-        self.statusBar().showMessage(f"μ=({μ1:.3g}, {μ2:.3g})")
+        self.statusBar().showMessage(f"μ=({μ1:.6g}, {μ2:.6g})")
 
     def _param_click(self,e):
         if not(e.inaxes and e.dblclick): return
@@ -638,16 +638,22 @@ class MainWindow(QMainWindow):
             tr = J11 + J22
             det = float(self.detJ_lam(xf, yf, μ1, μ2))
             discr = tr * tr - 4 * det
-
-            if det < 0:
-                color = "black"
+            # 2) определяем нестабильность
+            unstable = (det < 0) or (tr > 0)
+            # 3) рисуем
+            if unstable:
+                # неустойчивый узел, седло или спираль
+                ax.plot(
+                    xf, yf, 'o',
+                    markerfacecolor='white',  # mfc – заливка
+                    markeredgecolor='black',  # mec – обводка
+                    markeredgewidth=1.5,  # mew – толщина обводки
+                    markersize=8,
+                    linestyle='None'
+                )
             else:
-                if discr > 1e-6:
-                    color = "black" if tr < 0 else "black"
-                else:
-                    color = "black" if abs(tr) < 1e-6 else ("black" if tr < 0 else "black")
-
-            ax.plot(xf, yf, "o", color=color, ms=8)
+                # устойчивый узел или спираль
+                ax.plot(xf, yf, 'o', color='black', ms=8)
 
         ax.set_xlim(xmin, xmax)
         ax.set_ylim(ymin, ymax)
@@ -792,7 +798,7 @@ class MainWindow(QMainWindow):
 
                 for sgn in (+1, -1):
                     start = np.array([x0, y0]) + sgn * 5e-3 * v
-                    span = (0, 60) if lam > 0 else (0, -60)
+                    span = (0, 2000) if lam > 0 else (0, 2000)
 
                     sol = solve_ivp(
                         lambda t, s: self.rhs_func(t, s, μ1, μ2),
@@ -804,11 +810,11 @@ class MainWindow(QMainWindow):
                     )
 
                     # На основном холсте
-                    ln_main, = ax_main.plot(sol.y[0], sol.y[1], 'k--', lw=1)
+                    ln_main, = ax_main.plot(sol.y[0], sol.y[1], 'k--', lw=2)
                     self.sep_lines.append(ln_main)
 
                     # И в окне Phase & x(t)
-                    ln_win, = ax_win.plot(sol.y[0], sol.y[1], 'k--', lw=1)
+                    ln_win, = ax_win.plot(sol.y[0], sol.y[1], 'k--', lw=2)
                     self.sep_lines_win.append(ln_win)
 
         # Перерисовать оба холста
@@ -1003,3 +1009,4 @@ def main():
 
 if __name__=="__main__":
     main()
+# -5,001558

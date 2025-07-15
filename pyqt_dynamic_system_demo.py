@@ -798,7 +798,7 @@ class MainWindow(QMainWindow):
 
                 for sgn in (+1, -1):
                     start = np.array([x0, y0]) + sgn * 5e-3 * v
-                    span = (0, 2000) if lam > 0 else (0, 2000)
+                    span = (0, 500) if lam > 0 else (0, -90)
 
                     sol = solve_ivp(
                         lambda t, s: self.rhs_func(t, s, μ1, μ2),
@@ -810,11 +810,11 @@ class MainWindow(QMainWindow):
                     )
 
                     # На основном холсте
-                    ln_main, = ax_main.plot(sol.y[0], sol.y[1], 'k--', lw=2)
+                    ln_main, = ax_main.plot(sol.y[0], sol.y[1], 'r:', lw=2)
                     self.sep_lines.append(ln_main)
 
                     # И в окне Phase & x(t)
-                    ln_win, = ax_win.plot(sol.y[0], sol.y[1], 'k--', lw=2)
+                    ln_win, = ax_win.plot(sol.y[0], sol.y[1], 'r:', lw=2)
                     self.sep_lines_win.append(ln_win)
 
         # Перерисовать оба холста

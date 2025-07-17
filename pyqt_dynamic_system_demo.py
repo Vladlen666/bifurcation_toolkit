@@ -540,7 +540,7 @@ class MainWindow(QMainWindow):
             G = np.nan_to_num(self.g_lam(xx, yy, μ1, μ2))
 
         # Рисуем нулевые кривые (изоклины)
-        cf = ax.contour(xx, yy, F, levels=[0], colors="blue", linestyles="--", linewidths=2)
+        cf = ax.contour(xx, yy, F, levels=[0], colors="blue", linestyles="--", linewidths=2.01)
         cg = ax.contour(xx, yy, G, levels=[0], colors="green", linestyles="--", linewidths=2)
         self.nullcline_art.extend([cf, cg])
 

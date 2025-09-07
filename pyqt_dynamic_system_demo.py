@@ -15,6 +15,7 @@ matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.lines import Line2D
+from scipy.signal import welch
 
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QAction
@@ -180,15 +181,16 @@ class MainWindow(QMainWindow):
             plt.rcParams["axes.prop_cycle"].by_key()["color"]
         )
 
-        # SDE/шум: максимальный внутренний шаг интеграции
-        self.sde_max_step = 0.1
+        # SDE/шум:
+        self.sde_max_step = 0.05  # было 0.1 — чуть мельче базовый шаг
+        self.sde_extra_cap = 2000  # верхняя граница дробления по дрейфу
+        self.sde_max_disp = 1.0  # желаемый максимум смещения за субшаг (эвристика)
 
         # — основные холсты —
         self.param_canvas = MplCanvas()
         self.phase_canvas = MplCanvas()
         self.bt_canvas    = MplCanvas()
         self.xt_canvas    = MplCanvas()   # старый x(t)
-
         # — окно Phase & x(t) —
         self.phase_xt_window = PhaseXTDialog(self)
 
@@ -225,10 +227,37 @@ class MainWindow(QMainWindow):
         bt_l.addWidget(self.bt_table)
         self.tabs.addTab(bt_w, "BT")
         self.bt_tab_index = self.tabs.indexOf(bt_w)
+        self.tabs.addTab(self.xt_canvas, "x(t)")
+
+        # --- Analysis tab (ISI, PSD, metrics) ---
+        self.analysis_tab = QWidget()
+        an_lay = QVBoxLayout(self.analysis_tab)
+        row = QHBoxLayout()
+        self.isi_canvas = MplCanvas()
+        self.isi_canvas.ax.set_title("ISI histogram")
+        self.isi_canvas.ax.set_xlabel("ISI")
+        self.isi_canvas.ax.set_ylabel("Count")
+
+        self.psd_canvas = MplCanvas()
+        self.psd_canvas.ax.set_title("Power spectrum (Welch)")
+        self.psd_canvas.ax.set_xlabel("Frequency")
+        self.psd_canvas.ax.set_ylabel("Power")
+        self.psd_canvas.ax.set_xscale("log")  # удобно в лог-шкале
+        self.psd_canvas.ax.set_yscale("log")
+
+        row.addWidget(self.isi_canvas)
+        row.addWidget(self.psd_canvas)
+        an_lay.addLayout(row)
+
+        self.metrics_table = QTableWidget(0, 2)
+        self.metrics_table.setHorizontalHeaderLabels(["metric", "value"])
+        an_lay.addWidget(self.metrics_table)
+
+        self.tabs.addTab(self.analysis_tab, "Analysis")
 
         self.setCentralWidget(self.tabs)
         self._connect_events()
-
+        self.last_ic = None
         # первая отрисовка
         self.mu1_spin.setValue(self.mu1_spin.value())
 
@@ -393,25 +422,70 @@ class MainWindow(QMainWindow):
         self.noise_cb.currentTextChanged.connect(self._noise_changed)
         bar.addWidget(self.noise_cb)
 
-        bar.addWidget(QLabel("σ:"))
-        self.noise_sigma_spin = QDoubleSpinBox(decimals=4, minimum=0.0, maximum=10.0)
-        self.noise_sigma_spin.setSingleStep(0.01)
-        self.noise_sigma_spin.setValue(0.05)
-        bar.addWidget(self.noise_sigma_spin)
+        # σx, σy
+        bar.addWidget(QLabel("σₓ:"))
+        self.noise_sigmax_spin = QDoubleSpinBox(decimals=4, minimum=0.0, maximum=10.0)
+        self.noise_sigmax_spin.setSingleStep(0.01)
+        self.noise_sigmax_spin.setValue(0.05)
+        bar.addWidget(self.noise_sigmax_spin)
 
-        bar.addWidget(QLabel("τ:"))
-        self.noise_tau_spin = QDoubleSpinBox(decimals=4, minimum=1e-6, maximum=1e6)
-        self.noise_tau_spin.setSingleStep(0.01)
-        self.noise_tau_spin.setValue(1.0)
-        self.noise_tau_spin.setEnabled(False)
-        bar.addWidget(self.noise_tau_spin)
+        bar.addWidget(QLabel("σᵧ:"))
+        self.noise_sigmay_spin = QDoubleSpinBox(decimals=4, minimum=0.0, maximum=10.0)
+        self.noise_sigmay_spin.setSingleStep(0.01)
+        self.noise_sigmay_spin.setValue(0.05)
+        bar.addWidget(self.noise_sigmay_spin)
+
+        # τx, τy (для OU)
+        bar.addWidget(QLabel("τₓ:"))
+        self.noise_taux_spin = QDoubleSpinBox(decimals=4, minimum=1e-6, maximum=1e6)
+        self.noise_taux_spin.setSingleStep(0.01)
+        self.noise_taux_spin.setValue(1.0)
+        self.noise_taux_spin.setEnabled(False)
+        bar.addWidget(self.noise_taux_spin)
+
+        bar.addWidget(QLabel("τᵧ:"))
+        self.noise_tauy_spin = QDoubleSpinBox(decimals=4, minimum=1e-6, maximum=1e6)
+        self.noise_tauy_spin.setSingleStep(0.01)
+        self.noise_tauy_spin.setValue(1.0)
+        self.noise_tauy_spin.setEnabled(False)
+        bar.addWidget(self.noise_tauy_spin)
 
         bar.addWidget(QLabel("Seed:"))
         self.noise_seed_spin = QSpinBox()
         self.noise_seed_spin.setRange(0, 2_147_483_647)
         self.noise_seed_spin.setValue(42)
         bar.addWidget(self.noise_seed_spin)
-        # ============================== #
+
+        # === Spike detector params ===
+        bar.addSeparator()
+        bar.addWidget(QLabel("thr:"))
+        self.spike_thr_spin = QDoubleSpinBox(decimals=3, minimum=-1e6, maximum=1e6)
+        self.spike_thr_spin.setValue(2.0)
+        self.spike_thr_spin.setSingleStep(0.1)
+        bar.addWidget(self.spike_thr_spin)
+
+        bar.addWidget(QLabel("refr:"))
+        self.spike_refr_spin = QDoubleSpinBox(decimals=3, minimum=0.0, maximum=1e6)
+        self.spike_refr_spin.setValue(10.0)
+        self.spike_refr_spin.setSingleStep(1.0)
+        bar.addWidget(self.spike_refr_spin)
+
+        # === Quick actions ===
+        bar.addSeparator()
+        self.act_run_det = QAction("Run (no noise)", self)
+        self.act_run_det.triggered.connect(lambda: self._run_from_last_ic(with_noise=False))
+        bar.addAction(self.act_run_det)
+
+        self.act_run_noise = QAction("Run (with noise)", self)
+        self.act_run_noise.triggered.connect(lambda: self._run_from_last_ic(with_noise=True))
+        bar.addAction(self.act_run_noise)
+
+        bar.addSeparator()
+        self.act_analyze = QAction("Analyze", self)
+        self.act_analyze.triggered.connect(self._analyze_last_trace)
+        bar.addAction(self.act_analyze)
+
+        # ================================= #
 
         bar.addSeparator()
         btn = QPushButton("Clear")
@@ -441,7 +515,9 @@ class MainWindow(QMainWindow):
 
     def _noise_changed(self, *_):
         kind = self.noise_cb.currentText()
-        self.noise_tau_spin.setEnabled(kind == "OU")
+        en = (kind == "OU")
+        self.noise_taux_spin.setEnabled(en)
+        self.noise_tauy_spin.setEnabled(en)
 
     def _conf_param_axes(self):
         ax=self.param_canvas.ax;ax.clear()
@@ -881,10 +957,12 @@ class MainWindow(QMainWindow):
         if e.button == 3 and e.inaxes == ax:
             self._del_traj(e.xdata, e.ydata)
             return
-        if e.button != 1 or not e.dblclick or not self.current_mu:
+        # только левый двойной клик по фазовой плоскости и когда заданы текущие μ
+        if e.button != 1 or not e.dblclick or not self.current_mu or e.inaxes != ax:
             return
 
         x0, y0 = e.xdata, e.ydata
+        self.last_ic = (x0, y0)  # <-- теперь ЗДЕСЬ, после присваивания x0,y0
         μ1, μ2 = self.current_mu
 
         def rhs_sat(t, s):
@@ -904,7 +982,9 @@ class MainWindow(QMainWindow):
         t_bwd = t_full[t_full <= 0]
         t_fwd = t_full[t_full >= 0]
 
-        use_noise = (self.noise_cb.currentText() != "None") and (float(self.noise_sigma_spin.value()) > 0.0)
+        use_noise = (self.noise_cb.currentText() != "None") and (
+                float(self.noise_sigmax_spin.value()) > 0.0 or float(self.noise_sigmay_spin.value()) > 0.0
+        )
 
         if not use_noise:
             sol_bwd = solve_ivp(
@@ -957,52 +1037,127 @@ class MainWindow(QMainWindow):
 
         self.xt_data.append((t_vals, xs, color))
         self._update_xt()
+        self._analyze_last_trace()
 
         self.phase_canvas.canvas.draw_idle()
         self.act_xt.setEnabled(True)
 
-    def _sde_path(self, y0: np.ndarray, t_eval: np.ndarray, μ1: float, μ2: float, rng: np.random.Generator) -> np.ndarray:
-        """
-        Интеграция траектории с шумом по схеме Эйлера–Маруямы.
-        Два вида шума:
-          - "White":   x <- x + f dt + σ * sqrt(|dt|) * ξ
-          - "OU":      x <- x + f dt + η dt,   dη = -(η/τ) dt + sqrt(2 σ^2 / τ) dW
-        Шум добавляется к обоим уравнениям (x и y) аддитивно.
-        """
+    def _sde_path(self, y0: np.ndarray, t_eval: np.ndarray, μ1: float, μ2: float,
+                  rng: np.random.Generator) -> np.ndarray:
         kind = self.noise_cb.currentText()
-        sigma = float(self.noise_sigma_spin.value())
-        tau = float(self.noise_tau_spin.value())
+        sigma_x = float(self.noise_sigmax_spin.value())
+        sigma_y = float(self.noise_sigmay_spin.value())
+        tau_x = float(self.noise_taux_spin.value())
+        tau_y = float(self.noise_tauy_spin.value())
+        eps_tau = 1e-12
+
+        # предохранители
+        EXTRA_CAP = getattr(self, "sde_extra_cap", 2000)
+        MAX_DISP = getattr(self, "sde_max_disp", 1.0)
+        BOUNDS_HARD = 1e6  # жёсткий бокс; если вылет — прерываем интегрирование
 
         y = y0.astype(float).copy()
         out = np.empty((len(t_eval), 2), dtype=float)
         out[0] = y
-        eta = np.zeros(2, dtype=float)  # OU состояние
+
+        # OU-состояния по каналам
+        eta_x = 0.0
+        eta_y = 0.0
 
         for k in range(1, len(t_eval)):
-            dt_tot = float(t_eval[k] - t_eval[k-1])
+            dt_tot = float(t_eval[k] - t_eval[k - 1])
+            if dt_tot == 0.0:
+                out[k] = y
+                continue
+
+            # базовое дробление по максимальному шагу
             nsteps = max(1, int(np.ceil(abs(dt_tot) / self.sde_max_step)))
             dt = dt_tot / nsteps
-            sdt = np.sqrt(abs(dt))
-            for _ in range(nsteps):
-                # насыщенный детерминированный дрейф
-                dx, dy = self.rhs_func(0.0, y, μ1, μ2)
-                vmax = 1e3
-                v = np.hypot(dx, dy)
-                if v > vmax:
-                    scale = vmax / v
-                    dx *= scale; dy *= scale
-                drift = np.array([dx, dy], dtype=float)
 
-                if kind == "White":
-                    dW = rng.normal(size=2) * sigma * sdt
-                    y += drift * dt + dW
-                elif kind == "OU":
-                    # обновляем OU-процесс (стационарная дисперсия sigma^2)
-                    eta += (-eta / tau) * dt + np.sqrt(2.0 * sigma * sigma / tau) * sdt * rng.normal(size=2)
-                    y += drift * dt + eta * dt
-                else:
-                    y += drift * dt
+            for _ in range(nsteps):
+                # детерминированный дрейф (x', y') для текущих expr
+                fx, fy = self.rhs_func(0.0, y, μ1, μ2)
+                drift = np.array([fx, fy], dtype=float)
+                v = float(np.hypot(drift[0], drift[1]))
+
+                # 1) первичная оценка числа субшагов по скорости
+                vcap = 1e2
+                extra = max(1, int(np.ceil(v / vcap)))
+
+                # 2) обеспечиваем ограничение ожидаемого смещения за субшаг
+                #    эвристика: |смещение| ~ |drift|*|subdt| + σ_eff*sqrt(|subdt|)
+                def need_more(extra_now: int) -> bool:
+                    subdt = dt / extra_now
+                    if kind == "OU" and (sigma_x > 0 or sigma_y > 0) and (tau_x > eps_tau or tau_y > eps_tau):
+                        # при OU добавка ~ η*subdt; RMS(η) ~ σ, оценим шумовую часть консервативно
+                        sigma_eff = (sigma_x + sigma_y)  # грубо сверху
+                        noise_disp = sigma_eff * abs(subdt)
+                    else:
+                        # белый шум
+                        sigma_eff = np.hypot(sigma_x, sigma_y)
+                        noise_disp = sigma_eff * np.sqrt(abs(subdt))
+                    drift_disp = v * abs(subdt)
+                    return (drift_disp + noise_disp) > MAX_DISP
+
+                while need_more(extra) and extra < EXTRA_CAP:
+                    extra *= 2
+
+                # 3) кап по extra: если достигли — «мягко» уменьшаем дрейф, чтобы завершить шаг
+                if extra > EXTRA_CAP:
+                    scale = EXTRA_CAP / float(extra)
+                    drift *= scale
+                    extra = EXTRA_CAP
+
+                subdt = dt / extra
+                sdt = np.sqrt(abs(subdt))
+
+                # внутренние субшаги
+                for __ in range(extra):
+                    if kind == "White" and (sigma_x > 0.0 or sigma_y > 0.0):
+                        dWx = rng.normal() * sdt
+                        dWy = rng.normal() * sdt
+                        y[0] += drift[0] * subdt + sigma_x * dWx
+                        y[1] += drift[1] * subdt + sigma_y * dWy
+
+                    elif kind == "OU" and (sigma_x > 0.0 or sigma_y > 0.0):
+                        # x-канал
+                        if tau_x <= eps_tau:
+                            dWx = rng.normal() * sdt
+                            add_x = sigma_x * dWx
+                        else:
+                            alpha_x = np.exp(-abs(subdt) / tau_x)
+                            eta_x = eta_x * alpha_x + np.sqrt(
+                                max(0.0, 1.0 - alpha_x * alpha_x)) * sigma_x * rng.normal()
+                            add_x = eta_x * subdt
+
+                        # y-канал
+                        if tau_y <= eps_tau:
+                            dWy = rng.normal() * sdt
+                            add_y = sigma_y * dWy
+                        else:
+                            alpha_y = np.exp(-abs(subdt) / tau_y)
+                            eta_y = eta_y * alpha_y + np.sqrt(
+                                max(0.0, 1.0 - alpha_y * alpha_y)) * sigma_y * rng.normal()
+                            add_y = eta_y * subdt
+
+                        y[0] += drift[0] * subdt + add_x
+                        y[1] += drift[1] * subdt + add_y
+
+                    else:
+                        # без шума
+                        y += drift * subdt
+
+                    # охранные условия: NaN/Inf/вылет из бокса — прерываем текущий шаг
+                    if not np.isfinite(y).all() or (abs(y[0]) > BOUNDS_HARD or abs(y[1]) > BOUNDS_HARD):
+                        break
+
+                if not np.isfinite(y).all() or (abs(y[0]) > BOUNDS_HARD or abs(y[1]) > BOUNDS_HARD):
+                    # оборвём интегрирование: заполним остаток значениями последней точки
+                    out[k:] = y
+                    return out
+
             out[k] = y
+
         return out
 
     def _del_traj(self, x, y):
@@ -1060,6 +1215,194 @@ class MainWindow(QMainWindow):
         for t_vals, x_vals, color in self.xt_data:
             axw.plot(t_vals, x_vals, color=color, lw=3)
         self.phase_xt_window.canvas.draw_idle()
+
+    def _run_from_last_ic(self, with_noise: bool):
+        """Повторяет логику _phase_click без клика по фазовой плоскости: берёт last_ic."""
+        if self.last_ic is None or self.current_mu is None:
+            QMessageBox.information(self, "Info",
+                                    "Сначала двойным кликом задайте стартовую точку на фазовой плоскости.")
+            return
+        x0, y0 = self.last_ic
+        μ1, μ2 = self.current_mu
+
+        def rhs_sat(t, s):
+            dx, dy = self.rhs_func(t, s, μ1, μ2)
+            vmax = 1e3
+            v = np.hypot(dx, dy)
+            return np.array([dx, dy]) * (vmax / v if v > vmax else 1)
+
+        t0 = float(self.t0_spin.value())
+        t1 = float(self.t1_spin.value())
+        rtol = float(self.rtol_spin.value())
+        atol = float(self.atol_spin.value())
+        method = self.integrator_cb.currentText()
+
+        N = 1000
+        t_full = np.linspace(t0, t1, N)
+        t_bwd = t_full[t_full <= 0]
+        t_fwd = t_full[t_full >= 0]
+
+        use_noise = False
+        if with_noise:
+            use_noise = (self.noise_cb.currentText() != "None") and (
+                    float(self.noise_sigmax_spin.value()) > 0.0 or float(self.noise_sigmay_spin.value()) > 0.0
+            )
+
+        if not use_noise:
+            sol_bwd = solve_ivp(rhs_sat, (0, t0), [x0, y0], method=method, t_eval=t_bwd[::-1],
+                                rtol=rtol, atol=atol, max_step=0.1)
+            sol_fwd = solve_ivp(rhs_sat, (0, t1), [x0, y0], method=method, t_eval=t_fwd,
+                                rtol=rtol, atol=atol, max_step=0.1)
+            tb = sol_bwd.t[::-1];
+            xb, yb = sol_bwd.y[0][::-1], sol_bwd.y[1][::-1]
+            tf = sol_fwd.t;
+            xf, yf = sol_fwd.y
+        else:
+            seed = int(self.noise_seed_spin.value())
+            rng_b = np.random.default_rng(seed + 12345)
+            rng_f = np.random.default_rng(seed + 23456)
+            y_bw = self._sde_path(np.array([x0, y0], dtype=float), t_bwd[::-1], μ1, μ2, rng_b)
+            tb = t_bwd;
+            xb, yb = y_bw[:, 0][::-1], y_bw[:, 1][::-1]
+            y_fw = self._sde_path(np.array([x0, y0], dtype=float), t_fwd, μ1, μ2, rng_f)
+            tf = t_fwd;
+            xf, yf = y_fw[:, 0], y_fw[:, 1]
+
+        t_vals = np.concatenate([tb, tf[1:]])
+        xs = np.concatenate([xb, xf[1:]])
+        ys = np.concatenate([yb, yf[1:]])
+
+        color = next(self.color_cycle)
+        (ln,) = self.phase_canvas.ax.plot(xs, ys, color=color)
+        self.traj_lines.append(ln)
+        (lnw,) = self.phase_xt_window.ax_phase.plot(xs, ys, color=color, lw=2.5)
+        self.traj_lines_win.append(lnw)
+        self.phase_xt_window.canvas.draw_idle()
+
+        self.xt_data.append((t_vals, xs, color))
+        self._update_xt()
+        self.act_xt.setEnabled(True)
+
+        # автоанализ
+        self._analyze_last_trace()
+
+    def _detect_spikes(self, t: np.ndarray, x: np.ndarray, thr: float, refr: float) -> np.ndarray:
+        """Ап-кроссинг через порог thr с положительной производной и рефрактером (сек)."""
+        if len(t) < 3:
+            return np.array([], dtype=int)
+        dx = np.diff(x);  # производная по времени не нужна: достаточно dx>0
+        idx = np.where((x[:-1] < thr) & (x[1:] >= thr) & (dx > 0))[0]
+        if idx.size == 0:
+            return np.array([], dtype=int)
+        out = [idx[0] + 1];
+        last_t = t[out[0]]
+        for k in idx[1:]:
+            if t[k + 1] - last_t >= refr:
+                out.append(k + 1);
+                last_t = t[k + 1]
+        return np.array(out, dtype=int)
+
+    def _uniformize(self, t: np.ndarray, x: np.ndarray):
+        """Интерполяция на равномерную сетку для PSD (Welch)."""
+        tt = np.asarray(t, float)
+        xx = np.asarray(x, float)
+        dt = np.median(np.diff(tt))
+        t0, t1 = tt[0], tt[-1]
+        grid = np.arange(t0, t1, dt)
+        if grid.size < 16:
+            return tt, xx, 1.0 / dt
+        xg = np.interp(grid, tt, xx)
+        fs = 1.0 / dt
+        return grid, xg, fs
+
+    def _analyze_last_trace(self):
+        """Рисует ISI-гистограмму, PSD, заполняет метрики; ставит маркеры спайков на x(t)."""
+        if not self.xt_data:
+            return
+        thr = float(self.spike_thr_spin.value())
+        refr = float(self.spike_refr_spin.value())
+        t, x, color = self.xt_data[-1]
+
+        # Спайки и ISI
+        sp_idx = self._detect_spikes(t, x, thr=thr, refr=refr)
+        ts = t[sp_idx]
+        if ts.size >= 2:
+            isi = np.diff(ts)
+            mean_isi = float(np.mean(isi))
+            cv = float(np.std(isi) / mean_isi) if mean_isi > 0 else float("nan")
+            rate = 1.0 / mean_isi
+        else:
+            isi = np.array([])
+            mean_isi = float("nan");
+            cv = float("nan");
+            rate = 0.0
+
+        # Маркеры спайков на x(t)
+        self.xt_canvas.ax.plot(ts, x[sp_idx], 'o', ms=5)
+        self.xt_canvas.canvas.draw_idle()
+        self.phase_xt_window.ax_xt.plot(ts, x[sp_idx], 'o', ms=6)
+        self.phase_xt_window.canvas.draw_idle()
+
+        # ISI histogram
+        axh = self.isi_canvas.ax;
+        axh.clear()
+        if isi.size:
+            axh.hist(isi, bins=min(40, max(5, isi.size // 5)))
+        axh.set_title("ISI histogram");
+        axh.set_xlabel("ISI");
+        axh.set_ylabel("Count")
+        self.isi_canvas.canvas.draw_idle()
+
+        # PSD (Welch)
+        axp = self.psd_canvas.ax;
+        axp.clear()
+        tg, xg, fs = self._uniformize(t, x)
+        if xg.size >= 64:
+            nper = max(256, xg.size // 8)
+            f, Pxx = welch(xg, fs=fs, nperseg=nper, noverlap=nper // 2, detrend="constant", scaling="density")
+            # простая оценка SNR: пик/медиана фона (без DC)
+            valid = f > 0
+            if np.any(valid):
+                f_ok, P_ok = f[valid], Pxx[valid]
+                peak_idx = np.argmax(P_ok)
+                peak_f = float(f_ok[peak_idx]);
+                peak_pow = float(P_ok[peak_idx])
+                bkg = np.median(np.delete(P_ok, peak_idx)) if P_ok.size > 1 else float("nan")
+                snr = float(peak_pow / bkg) if (bkg and np.isfinite(bkg) and bkg > 0) else float("nan")
+            else:
+                peak_f = float("nan");
+                peak_pow = float("nan");
+                snr = float("nan")
+            axp.plot(f, Pxx)
+            axp.set_xscale("log");
+            axp.set_yscale("log")
+            axp.set_title("Power spectrum (Welch)")
+            axp.set_xlabel("Frequency");
+            axp.set_ylabel("Power")
+        else:
+            peak_f = float("nan");
+            snr = float("nan")
+            axp.text(0.5, 0.5, "Not enough data for PSD", ha='center', va='center', transform=axp.transAxes)
+        self.psd_canvas.canvas.draw_idle()
+
+        # Таблица метрик
+        def set_row(r, name, val):
+            while self.metrics_table.rowCount() <= r:
+                self.metrics_table.insertRow(self.metrics_table.rowCount())
+            self.metrics_table.setItem(r, 0, QTableWidgetItem(name))
+            try:
+                txt = f"{val:.6g}"
+            except Exception:
+                txt = str(val)
+            self.metrics_table.setItem(r, 1, QTableWidgetItem(txt))
+
+        self.metrics_table.setRowCount(0)
+        set_row(0, "spike count", int(ts.size))
+        set_row(1, "mean ISI", mean_isi)
+        set_row(2, "CV(ISI)", cv)
+        set_row(3, "rate (1/mean ISI)", rate)
+        set_row(4, "PSD peak freq", locals().get("peak_f", float("nan")))
+        set_row(5, "SNR (peak/median)", locals().get("snr", float("nan")))
 
     # -------------------- 4.11  Диалоги ------------------------------------ #
     def _dlg_system(self):

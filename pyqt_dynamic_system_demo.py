@@ -27,17 +27,11 @@ from PyQt6.QtWidgets import (
     QMessageBox, QTabWidget, QTableWidget, QTableWidgetItem, QSpinBox
 )
 
-# --------------------------------------------------------------------------- #
-# 1. «Безопасная» экспонента                                                  #
-# --------------------------------------------------------------------------- #
 EXP_CLIP = 50.0
 def safe_exp(z):
     return np.exp(np.clip(z, -EXP_CLIP, EXP_CLIP))
 SAFE_MODULE = {'exp': safe_exp, 'safe_exp': safe_exp, 'np': np}
 
-# --------------------------------------------------------------------------- #
-# 2. Вспомогательные диалоги                                                  #
-# --------------------------------------------------------------------------- #
 class SystemDialog(QDialog):
     def __init__(self, f_txt: str, g_txt: str, parent=None):
         super().__init__(parent)
@@ -100,9 +94,7 @@ class PhaseRangeDialog(QDialog):
         return {k: w.value() for k, w in self.edits.items()}
 
 
-# --------------------------------------------------------------------------- #
-# 3. Matplotlib-канвас                                                        #
-# --------------------------------------------------------------------------- #
+
 class MplCanvas(QWidget):
     def __init__(self):
         super().__init__()
@@ -141,28 +133,22 @@ class PhaseXTDialog(QDialog):
         layout.addWidget(self.canvas)
         layout.addWidget(self.toolbar)
 
-# --------------------------------------------------------------------------- #
-# 4. Главное окно                                                             #
-# --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Dynamic-System Sandbox — BT only")
         self.resize(1500, 650)
 
-        # — диапазоны и формулы системы —
         self.range = dict(mu1_min=-15, mu1_max=15, mu2_min=-15, mu2_max=15)
         self.phase_range = dict(x_min=-5, x_max=25, y_min=-4, y_max=2)
         self.f_expr = "-2*exp(-x) + exp(-2*x) + y"
         self.g_expr = "(-x + mu2*y + mu1)*0.01"
 
-        # подготовка под компиляцию
         self.eq_funcs: list[tuple[Callable, Callable]] = []
         self.hopf_branches: list[tuple[Callable, Callable|None, Callable|None]] = []
         self.bt_pts: list[tuple[float, float, float, float]] = []
         self._compile_system()
 
-        # — GUI-состояние —
         self.current_mu: tuple[float, float] | None = None
         self.traj_lines = []
         self.xt_data     = []
@@ -181,31 +167,29 @@ class MainWindow(QMainWindow):
             plt.rcParams["axes.prop_cycle"].by_key()["color"]
         )
 
-        # SDE/шум:
-        self.sde_max_step = 0.05  # было 0.1 — чуть мельче базовый шаг
-        self.sde_extra_cap = 2000  # верхняя граница дробления по дрейфу
-        self.sde_max_disp = 1.0  # желаемый максимум смещения за субшаг (эвристика)
 
-        # — основные холсты —
+        self.sde_max_step = 0.05 
+        self.sde_extra_cap = 2000  
+        self.sde_max_disp = 1.0  
+
+
         self.param_canvas = MplCanvas()
         self.phase_canvas = MplCanvas()
         self.bt_canvas    = MplCanvas()
-        self.xt_canvas    = MplCanvas()   # старый x(t)
-        # — окно Phase & x(t) —
+        self.xt_canvas    = MplCanvas()   
+
         self.phase_xt_window = PhaseXTDialog(self)
 
-        # — тулбар —
+
         self.toolbar = self.addToolBar("Controls")
         self._build_toolbar()
         open_act = QAction("Phase+x(t) window", self)
         open_act.triggered.connect(self.phase_xt_window.show)
         self.toolbar.addAction(open_act)
 
-        # — настройка осей —
         self._conf_param_axes()
         self._conf_phase_axes()
 
-        # — табы —
         spl = QSplitter(Qt.Orientation.Horizontal)
         spl.addWidget(self.param_canvas)
         spl.addWidget(self.phase_canvas)
@@ -229,7 +213,6 @@ class MainWindow(QMainWindow):
         self.bt_tab_index = self.tabs.indexOf(bt_w)
         self.tabs.addTab(self.xt_canvas, "x(t)")
 
-        # --- Analysis tab (ISI, PSD, metrics) ---
         self.analysis_tab = QWidget()
         an_lay = QVBoxLayout(self.analysis_tab)
         row = QHBoxLayout()
@@ -242,7 +225,7 @@ class MainWindow(QMainWindow):
         self.psd_canvas.ax.set_title("Power spectrum (Welch)")
         self.psd_canvas.ax.set_xlabel("Frequency")
         self.psd_canvas.ax.set_ylabel("Power")
-        self.psd_canvas.ax.set_xscale("log")  # удобно в лог-шкале
+        self.psd_canvas.ax.set_xscale("log")  
         self.psd_canvas.ax.set_yscale("log")
 
         row.addWidget(self.isi_canvas)
@@ -261,12 +244,8 @@ class MainWindow(QMainWindow):
         # первая отрисовка
         self.mu1_spin.setValue(self.mu1_spin.value())
 
-    # -------------------- 4.1  Компиляция и BT-поиск ----------------------- #
     def _compile_system(self):
-        """
-        Компилирует текущую систему из self.f_expr и self.g_expr,
-        формирует численные лямбда-функции, ветви Гопфа и точки БТ.
-        """
+
         x, y, m1, m2 = sp.symbols("x y mu1 mu2")
 
         f_sym = sp.sympify(self.f_expr)
@@ -276,7 +255,6 @@ class MainWindow(QMainWindow):
         detJ = sp.simplify(J.det())
         trJ = sp.simplify(J.trace())
 
-        # lambdify
         self.f_lam = sp.lambdify((x, y, m1, m2), f_sym, modules=[SAFE_MODULE, 'numpy'])
         self.g_lam = sp.lambdify((x, y, m1, m2), g_sym, modules=[SAFE_MODULE, 'numpy'])
         self.J11 = sp.lambdify((x, y, m1, m2), J[0, 0], modules=[SAFE_MODULE, 'numpy'])
@@ -290,12 +268,10 @@ class MainWindow(QMainWindow):
             self.g_lam(s[0], s[1], μ1, μ2)
         ])
 
-        # сброс
         self.eq_funcs.clear()
         self.hopf_branches.clear()
         self.bt_pts.clear()
 
-        # 1) Аналитические равновесия и ветви Hopf (trJ=0)
         try:
             sols = sp.solve([f_sym, g_sym], [x, y], dict=True)
         except NotImplementedError:
@@ -322,7 +298,6 @@ class MainWindow(QMainWindow):
                     phi_f = None
                 self.hopf_branches.append((phi_f, xi_f, yi_f))
 
-        # 2) Численный поиск Bogdanov–Takens (f=0, g=0, trJ=0, detJ=0)
         def F(vars):
             xv, yv, m1v, m2v = vars
             return [
@@ -354,7 +329,6 @@ class MainWindow(QMainWindow):
                 continue
             if any(abs(u - uu) < 1e-6 and abs(v - vv) < 1e-6 for _, _, uu, vv in pts):
                 continue
-            # проверим кратность нуля (ранг Якоби)
             Jnum = np.array([[self.J11(x0, y0, u, v), self.J12(x0, y0, u, v)],
                              [self.J21(x0, y0, u, v), self.J22(x0, y0, u, v)]], dtype=float)
             ev = np.linalg.eigvals(Jnum)
@@ -362,7 +336,6 @@ class MainWindow(QMainWindow):
                 pts.append((float(x0), float(y0), float(u), float(v)))
         self.bt_pts = pts
 
-    # ----------------------- 4.2  UI-элементы ----------------------------- #
     def _build_toolbar(self):
         bar = self.toolbar
         bar.setIconSize(QSize(16,16))
@@ -414,7 +387,6 @@ class MainWindow(QMainWindow):
         self.atol_spin.setValue(1e-7)
         bar.addWidget(self.atol_spin)
 
-        # ======== ШУМ (новое) ======== #
         bar.addSeparator()
         bar.addWidget(QLabel("Noise:"))
         self.noise_cb = QComboBox()
@@ -456,7 +428,6 @@ class MainWindow(QMainWindow):
         self.noise_seed_spin.setValue(42)
         bar.addWidget(self.noise_seed_spin)
 
-        # === Spike detector params ===
         bar.addSeparator()
         bar.addWidget(QLabel("thr:"))
         self.spike_thr_spin = QDoubleSpinBox(decimals=3, minimum=-1e6, maximum=1e6)
@@ -470,7 +441,6 @@ class MainWindow(QMainWindow):
         self.spike_refr_spin.setSingleStep(1.0)
         bar.addWidget(self.spike_refr_spin)
 
-        # === Quick actions ===
         bar.addSeparator()
         self.act_run_det = QAction("Run (no noise)", self)
         self.act_run_det.triggered.connect(lambda: self._run_from_last_ic(with_noise=False))
@@ -484,8 +454,6 @@ class MainWindow(QMainWindow):
         self.act_analyze = QAction("Analyze", self)
         self.act_analyze.triggered.connect(self._analyze_last_trace)
         bar.addAction(self.act_analyze)
-
-        # ================================= #
 
         bar.addSeparator()
         btn = QPushButton("Clear")
@@ -542,11 +510,8 @@ class MainWindow(QMainWindow):
         self.param_canvas.canvas.mpl_connect("button_press_event",self._param_click)
         self.phase_canvas.canvas.mpl_connect("button_press_event",self._phase_click)
 
-    # -------------------- 4.3  Параметрическая плоскость ------------------- #
     def _draw_param_features(self):
-        """Рисует на параметрической плоскости ветви Hopf и точки BT."""
         ax = self.param_canvas.ax
-        # очистим старые артефакты, кроме маркера текущих μ
         for art in list(ax.lines):
             if art is self.param_marker:
                 continue
@@ -556,7 +521,6 @@ class MainWindow(QMainWindow):
 
         μ1_grid = np.linspace(self.range["mu1_min"], self.range["mu1_max"], 800)
 
-        # Ветви Hopf (если удалось получить phi(mu1))
         hopf_handles = []
         for phi_f, xi_f, yi_f in self.hopf_branches:
             if phi_f is None:
@@ -577,7 +541,6 @@ class MainWindow(QMainWindow):
             ys = [p[3] for p in self.bt_pts]
             ax.plot(xs, ys, 'ks', ms=7, label="BT")
 
-        # Легенда
         labels = []
         handles = []
         if hopf_handles:
@@ -589,7 +552,6 @@ class MainWindow(QMainWindow):
         if handles:
             ax.legend(handles, labels, fontsize="small", loc="best")
 
-    # -------------------- 4.4  BT-вкладка ---------------------------------- #
     def _toggle_bt(self, chk):
         ax = self.bt_canvas.ax
         ax.clear()
@@ -629,7 +591,6 @@ class MainWindow(QMainWindow):
 
         self.bt_canvas.canvas.draw_idle()
 
-    # -------------------- 4.5  Спины/клики/обновления ---------------------- #
     def _spin_changed(self, _=None):
         μ1, μ2 = self.mu1_spin.value(), self.mu2_spin.value()
         self.current_mu = (μ1, μ2)
@@ -659,7 +620,6 @@ class MainWindow(QMainWindow):
         self.mu2_spin.blockSignals(True);self.mu2_spin.setValue(μ2);self.mu2_spin.blockSignals(False)
         self._spin_changed()
 
-    # -------------------- 4.6  Равновесия/нулклайны ------------------------ #
     def _find_eq(self,μ1,μ2):
         sols=[];tol_f,tol_xy=1e-4,1e-3
         xmn,xmx=self.phase_range["x_min"],self.phase_range["x_max"]
@@ -785,7 +745,6 @@ class MainWindow(QMainWindow):
         if self.show_field:
             self._draw_window_field(μ1, μ2)
 
-    # -------------------- 4.7  Окно Phase --------------------------------- #
     def _draw_window_phase(self, μ1, μ2):
         ax = self.phase_xt_window.ax_phase
         ax.clear()
@@ -830,7 +789,6 @@ class MainWindow(QMainWindow):
 
         self.phase_xt_window.canvas.draw_idle()
 
-    # -------------------- 4.8  Векторное поле ------------------------------ #
     def _draw_vect(self):
         if not self.current_mu:
             return
@@ -888,7 +846,6 @@ class MainWindow(QMainWindow):
         self.phase_canvas.canvas.draw_idle()
         self.phase_xt_window.canvas.draw_idle()
 
-    # -------------------- 4.9  Сепаратрисы --------------------------------- #
     def _toggle_sep(self,chk):
         if chk: self._draw_sep()
         else: self._clear_sep()
@@ -925,12 +882,12 @@ class MainWindow(QMainWindow):
                     continue
                 v = v / np.linalg.norm(v)
 
-                Tmax = 1000  # время интегрирования сепаратрис
+                Tmax = 1000  
                 for sgn in (+1, -1):
                     start = np.array([x0, y0]) + sgn * 5e-3 * v
-                    if lam > 0:  # неустойчивое направление → интегрируем вперёд
+                    if lam > 0:  
                         span = (0, Tmax)
-                    else:  # устойчивое направление → интегрируем назад
+                    else:  
                         span = (0, 0)
 
                     sol = solve_ivp(
@@ -951,13 +908,11 @@ class MainWindow(QMainWindow):
         self.phase_canvas.canvas.draw_idle()
         self.phase_xt_window.canvas.draw_idle()
 
-    # -------------------- 4.10  Интегрирование/траектории ------------------ #
     def _phase_click(self, e):
         ax = self.phase_canvas.ax
         if e.button == 3 and e.inaxes == ax:
             self._del_traj(e.xdata, e.ydata)
             return
-        # только левый двойной клик по фазовой плоскости и когда заданы текущие μ
         if e.button != 1 or not e.dblclick or not self.current_mu or e.inaxes != ax:
             return
 
@@ -1051,7 +1006,6 @@ class MainWindow(QMainWindow):
         tau_y = float(self.noise_tauy_spin.value())
         eps_tau = 1e-12
 
-        # предохранители
         EXTRA_CAP = getattr(self, "sde_extra_cap", 2000)
         MAX_DISP = getattr(self, "sde_max_disp", 1.0)
         BOUNDS_HARD = 1e6  # жёсткий бокс; если вылет — прерываем интегрирование
@@ -1060,7 +1014,6 @@ class MainWindow(QMainWindow):
         out = np.empty((len(t_eval), 2), dtype=float)
         out[0] = y
 
-        # OU-состояния по каналам
         eta_x = 0.0
         eta_y = 0.0
 
@@ -1070,30 +1023,23 @@ class MainWindow(QMainWindow):
                 out[k] = y
                 continue
 
-            # базовое дробление по максимальному шагу
             nsteps = max(1, int(np.ceil(abs(dt_tot) / self.sde_max_step)))
             dt = dt_tot / nsteps
 
             for _ in range(nsteps):
-                # детерминированный дрейф (x', y') для текущих expr
                 fx, fy = self.rhs_func(0.0, y, μ1, μ2)
                 drift = np.array([fx, fy], dtype=float)
                 v = float(np.hypot(drift[0], drift[1]))
 
-                # 1) первичная оценка числа субшагов по скорости
                 vcap = 1e2
                 extra = max(1, int(np.ceil(v / vcap)))
 
-                # 2) обеспечиваем ограничение ожидаемого смещения за субшаг
-                #    эвристика: |смещение| ~ |drift|*|subdt| + σ_eff*sqrt(|subdt|)
                 def need_more(extra_now: int) -> bool:
                     subdt = dt / extra_now
                     if kind == "OU" and (sigma_x > 0 or sigma_y > 0) and (tau_x > eps_tau or tau_y > eps_tau):
-                        # при OU добавка ~ η*subdt; RMS(η) ~ σ, оценим шумовую часть консервативно
                         sigma_eff = (sigma_x + sigma_y)  # грубо сверху
                         noise_disp = sigma_eff * abs(subdt)
                     else:
-                        # белый шум
                         sigma_eff = np.hypot(sigma_x, sigma_y)
                         noise_disp = sigma_eff * np.sqrt(abs(subdt))
                     drift_disp = v * abs(subdt)
@@ -1102,7 +1048,6 @@ class MainWindow(QMainWindow):
                 while need_more(extra) and extra < EXTRA_CAP:
                     extra *= 2
 
-                # 3) кап по extra: если достигли — «мягко» уменьшаем дрейф, чтобы завершить шаг
                 if extra > EXTRA_CAP:
                     scale = EXTRA_CAP / float(extra)
                     drift *= scale
@@ -1111,7 +1056,6 @@ class MainWindow(QMainWindow):
                 subdt = dt / extra
                 sdt = np.sqrt(abs(subdt))
 
-                # внутренние субшаги
                 for __ in range(extra):
                     if kind == "White" and (sigma_x > 0.0 or sigma_y > 0.0):
                         dWx = rng.normal() * sdt
@@ -1144,15 +1088,12 @@ class MainWindow(QMainWindow):
                         y[1] += drift[1] * subdt + add_y
 
                     else:
-                        # без шума
                         y += drift * subdt
 
-                    # охранные условия: NaN/Inf/вылет из бокса — прерываем текущий шаг
                     if not np.isfinite(y).all() or (abs(y[0]) > BOUNDS_HARD or abs(y[1]) > BOUNDS_HARD):
                         break
 
                 if not np.isfinite(y).all() or (abs(y[0]) > BOUNDS_HARD or abs(y[1]) > BOUNDS_HARD):
-                    # оборвём интегрирование: заполним остаток значениями последней точки
                     out[k:] = y
                     return out
 
@@ -1217,7 +1158,6 @@ class MainWindow(QMainWindow):
         self.phase_xt_window.canvas.draw_idle()
 
     def _run_from_last_ic(self, with_noise: bool):
-        """Повторяет логику _phase_click без клика по фазовой плоскости: берёт last_ic."""
         if self.last_ic is None or self.current_mu is None:
             QMessageBox.information(self, "Info",
                                     "Сначала двойным кликом задайте стартовую точку на фазовой плоскости.")
@@ -1283,14 +1223,12 @@ class MainWindow(QMainWindow):
         self._update_xt()
         self.act_xt.setEnabled(True)
 
-        # автоанализ
         self._analyze_last_trace()
 
     def _detect_spikes(self, t: np.ndarray, x: np.ndarray, thr: float, refr: float) -> np.ndarray:
-        """Ап-кроссинг через порог thr с положительной производной и рефрактером (сек)."""
         if len(t) < 3:
             return np.array([], dtype=int)
-        dx = np.diff(x);  # производная по времени не нужна: достаточно dx>0
+        dx = np.diff(x);  
         idx = np.where((x[:-1] < thr) & (x[1:] >= thr) & (dx > 0))[0]
         if idx.size == 0:
             return np.array([], dtype=int)
@@ -1303,7 +1241,6 @@ class MainWindow(QMainWindow):
         return np.array(out, dtype=int)
 
     def _uniformize(self, t: np.ndarray, x: np.ndarray):
-        """Интерполяция на равномерную сетку для PSD (Welch)."""
         tt = np.asarray(t, float)
         xx = np.asarray(x, float)
         dt = np.median(np.diff(tt))
@@ -1316,7 +1253,6 @@ class MainWindow(QMainWindow):
         return grid, xg, fs
 
     def _analyze_last_trace(self):
-        """Рисует ISI-гистограмму, PSD, заполняет метрики; ставит маркеры спайков на x(t)."""
         if not self.xt_data:
             return
         thr = float(self.spike_thr_spin.value())
@@ -1337,13 +1273,11 @@ class MainWindow(QMainWindow):
             cv = float("nan");
             rate = 0.0
 
-        # Маркеры спайков на x(t)
         self.xt_canvas.ax.plot(ts, x[sp_idx], 'o', ms=5)
         self.xt_canvas.canvas.draw_idle()
         self.phase_xt_window.ax_xt.plot(ts, x[sp_idx], 'o', ms=6)
         self.phase_xt_window.canvas.draw_idle()
 
-        # ISI histogram
         axh = self.isi_canvas.ax;
         axh.clear()
         if isi.size:
@@ -1360,7 +1294,6 @@ class MainWindow(QMainWindow):
         if xg.size >= 64:
             nper = max(256, xg.size // 8)
             f, Pxx = welch(xg, fs=fs, nperseg=nper, noverlap=nper // 2, detrend="constant", scaling="density")
-            # простая оценка SNR: пик/медиана фона (без DC)
             valid = f > 0
             if np.any(valid):
                 f_ok, P_ok = f[valid], Pxx[valid]
@@ -1404,7 +1337,6 @@ class MainWindow(QMainWindow):
         set_row(4, "PSD peak freq", locals().get("peak_f", float("nan")))
         set_row(5, "SNR (peak/median)", locals().get("snr", float("nan")))
 
-    # -------------------- 4.11  Диалоги ------------------------------------ #
     def _dlg_system(self):
         dlg=SystemDialog(self.f_expr,self.g_expr,self)
         if dlg.exec():
@@ -1456,9 +1388,6 @@ class MainWindow(QMainWindow):
             self._draw_window_phase(μ1, μ2)
             if self.show_field: self._draw_window_field(μ1, μ2)
 
-# --------------------------------------------------------------------------- #
-# 5. main                                                                     #
-# --------------------------------------------------------------------------- #
 def main():
     app=QApplication(sys.argv)
     win=MainWindow()
